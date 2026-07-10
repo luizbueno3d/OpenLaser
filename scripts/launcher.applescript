@@ -19,7 +19,9 @@ set serverURL to "http://127.0.0.1:" & portNumber & "/"
 set safetyURL to serverURL & "api/safety"
 
 set quotedProject to quoted form of projectPath
-set startCommand to "cd " & quotedProject & " && ./.venv/bin/python -m mopa_luiz ui --port " & portNumber
+-- The app opens the URL itself, so --no-browser prevents the Python CLI from
+-- opening a second copy of the same tab.
+set startCommand to "cd " & quotedProject & " && ./.venv/bin/python -m mopa_luiz ui --no-browser --port " & portNumber
 
 -- Probe whether the server is already up.
 set alreadyUp to false

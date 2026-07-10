@@ -318,7 +318,12 @@ def plan_test_box(args: argparse.Namespace) -> int:
 def serve_ui_command(args: argparse.Namespace) -> int:
     from .ui import serve
 
-    serve(host=args.host, port=args.port, markcfg=args.profile)
+    serve(
+        host=args.host,
+        port=args.port,
+        markcfg=args.profile,
+        open_browser=not args.no_browser,
+    )
     return 0
 
 
@@ -362,6 +367,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--profile", "--markcfg", dest="profile", metavar="PROFILE", type=Path, default=DEFAULT_PROFILE)
+    p.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Start the UI server without opening the system's default browser.",
+    )
     p.set_defaults(func=serve_ui_command)
 
     p = sub.add_parser("inspect-profile", help="Report which machine profile fields are applied/unused.")
