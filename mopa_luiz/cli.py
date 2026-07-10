@@ -15,8 +15,11 @@ from typing import Any
 
 
 DEFAULT_PROFILE = Path(os.environ.get(
-    "OPENMOPA_PROFILE",
-    Path(__file__).resolve().parents[1] / "profiles" / "openmopa-machine.ini",
+    "OPENLASER_PROFILE",
+    os.environ.get(
+        "OPENMOPA_PROFILE",
+        Path(__file__).resolve().parents[1] / "profiles" / "openmopa-machine.ini",
+    ),
 ))
 DEFAULT_MARKCFG = DEFAULT_PROFILE
 
@@ -228,6 +231,13 @@ def pulse_widths(_: argparse.Namespace) -> int:
     return 0
 
 
+def list_machines(_: argparse.Namespace) -> int:
+    from .machines import machine_catalog
+
+    print(json.dumps({"machines": machine_catalog()}, indent=2))
+    return 0
+
+
 def build_test_box_plan(
     cfg: MarkConfig,
     power: float,
@@ -321,8 +331,8 @@ def inspect_profile(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="openmopa",
-        description="OpenMopa: dry-run-first JCZ/LMC JPT M7 MOPA control prototype.",
+        prog="openlaser",
+        description="OpenLaser: safety-first jobs for galvo, gantry laser, and plotter machines.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -335,6 +345,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("pulse-widths", help="Print the guarded JPT M7 pulse-width table.")
     p.set_defaults(func=pulse_widths)
+
+    p = sub.add_parser("machines", help="List built-in machine profiles and capabilities.")
+    p.set_defaults(func=list_machines)
 
     p = sub.add_parser("plan-test-box", help="Plan a test box without emission.")
     p.add_argument("--profile", "--markcfg", dest="profile", metavar="PROFILE", type=Path, default=DEFAULT_PROFILE)

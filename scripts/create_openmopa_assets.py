@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
 ICONS = ASSETS / "icons"
-MACOS_APP = ROOT / "OpenMopa.app"
+MACOS_APP = ROOT / "OpenLaser.app"
 MACOS_RESOURCES = MACOS_APP / "Contents" / "Resources"
 
 

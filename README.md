@@ -1,498 +1,503 @@
-# OpenMopa
+# OpenLaser
 
 <p align="center">
-  <img src="assets/icons/openmopa.png" alt="OpenMopa icon" width="160">
+  <img src="assets/icons/openmopa.png" alt="OpenLaser icon" width="160">
 </p>
 
-Safety-first prototype for controlling a JCZ/BJJCZ LMC fiber galvo with a JPT
-M7 60 W MOPA source. Inspired by LightBurn, built on top of
-`galvoplotter` for the protocol layer.
+OpenLaser is an open-source workspace for preparing jobs for:
 
-OpenMopa ships with a default machine profile for a 200 mm JPT M7 MOPA setup.
-The profile is read-only at runtime; OpenMopa never modifies your calibration
-files. Default behavior is dry-run / red-light framing only. Laser emission
-happens only after explicit ARM and a final confirmation, and only inside
-the current safety policy.
+- JPT MOPA fiber galvo lasers using JCZ/BJJCZ LMC controllers.
+- GRBL-compatible CO₂ laser cutters.
+- GRBL-compatible diode lasers.
+- GRBL-compatible pen plotters.
 
-## Quick start (macOS)
+You can import artwork, arrange it on the machine bed, assign operations and
+settings to layers, preview the job, and either run it directly or export
+G-code.
 
-OpenMopa is currently developed and tested on macOS. The UI is a local web app,
-so the screen you use in the browser is simple; the hardware layer is the part
-that still needs platform-specific testing.
+> [!IMPORTANT]
+> OpenLaser is early-stage software that controls equipment capable of causing
+> fires, eye injuries, burns, fumes, and machine damage. Never leave a running
+> machine unattended. Wear the correct laser safety protection, use ventilation,
+> keep a suitable fire extinguisher nearby, and test at low power first.
 
-### The easy way — no Terminal, no programming
+## What works today
 
-1. **Download OpenMopa.** On this GitHub page, click the green **Code**
-   button, then **Download ZIP**. Unzip it.
-2. **Put the folder somewhere permanent**, for example inside `Documents`.
-   (Pick the final spot now — the app lives in this folder.)
-3. **Open the folder and double-click `Install OpenMopa.command`.**
-   If macOS warns that it "cannot verify the developer", right-click the
-   file and choose **Open** instead. The installer checks for Python,
-   installs everything OpenMopa needs, and builds `OpenMopa.app` — and tells
-   you in plain words if anything is missing.
-4. When it says **Done**, double-click **`OpenMopa.app`**. Your browser opens
-   with OpenMopa running. Drag `OpenMopa.app` to your **Dock** so next time
-   it is one click.
+| Machine | What OpenLaser does | How the job reaches the machine |
+| --- | --- | --- |
+| JPT M7 MOPA, 200 mm galvo | Import, plan, red-light frame, and mark | Direct JCZ/LMC USB control |
+| GRBL CO₂, 600 × 400 mm | Import, plan, raster/vector processing, and G-code export | Open the exported file in your trusted GRBL sender |
+| GRBL diode, 400 × 400 mm | Import, plan, raster/vector processing, and G-code export | Open the exported file in your trusted GRBL sender |
+| GRBL pen plotter, A4 | Import, plan, and pen-motion G-code export | Open the exported file in your trusted GRBL sender |
 
-To quit OpenMopa, close the Terminal window that the app opened.
-If you later move the folder, just double-click the installer again.
+The GRBL CO₂ profile is for controllers that accept normal GRBL G-code. It does
+not control Ruida DSP controllers yet.
 
-### The Terminal way (for developers)
+## Install OpenLaser on a Mac — easiest method
+
+You do not need to know programming or Terminal commands for this method.
+
+### 1. Download OpenLaser
+
+1. Open the [OpenLaser GitHub page](https://github.com/luizbueno3d/OpenLaser).
+2. Click the green **Code** button.
+3. Click **Download ZIP**.
+4. Open your Downloads folder.
+5. Double-click the ZIP file to unzip it.
+6. Move the new `OpenLaser` folder to a permanent place such as `Documents`.
+
+Do not run OpenLaser directly from the Downloads folder if you intend to move
+it later. The generated app stays connected to the project folder beside it.
+
+### 2. Make sure Python is installed
+
+OpenLaser needs Python 3.10 or newer.
+
+1. Open [python.org/downloads](https://www.python.org/downloads/).
+2. Download the current Python 3 installer for macOS.
+3. Open the downloaded installer.
+4. Follow the normal installation steps.
+
+If you already have Python 3.10 or newer, you may skip this step. The OpenLaser
+installer checks for it automatically.
+
+### 3. Run the OpenLaser installer
+
+1. Open the `OpenLaser` folder.
+2. Find **Install OpenLaser.command**.
+3. Right-click it, or hold Control and click it.
+4. Choose **Open**.
+5. If macOS shows another warning, choose **Open** again.
+6. Wait while the installer creates OpenLaser's private environment and installs
+   its dependencies.
+7. When you see **Done! OpenLaser is installed**, press any key to close the
+   installer window.
+
+The installer creates `OpenLaser.app` inside the same folder.
+
+### 4. Start OpenLaser
+
+1. Double-click **OpenLaser.app**.
+2. A Terminal window opens. Leave it open while you use OpenLaser.
+3. Your web browser opens to `http://127.0.0.1:8765`.
+
+This address is local to your computer. The interface is displayed in a browser,
+but the job is not uploaded to a website.
+
+You may drag `OpenLaser.app` to your Dock for easier access. Keep the actual app
+file inside the OpenLaser project folder.
+
+### 5. Stop OpenLaser
+
+Close the Terminal window that OpenLaser opened, or click that window and press
+Control-C. Closing only the browser tab does not stop the OpenLaser server.
+
+## Install with Terminal — developers and advanced users
+
+Open Terminal and run these commands one line at a time:
 
 ```bash
-git clone https://github.com/luizbueno3d/OpenMopa.git
-cd OpenMopa
+git clone https://github.com/luizbueno3d/OpenLaser.git
+cd OpenLaser
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e ".[hardware]"
-openmopa ui
+openlaser ui
 ```
 
-Dependencies (`galvoplotter`, `pyusb`) install automatically with
-`pip install -e ".[hardware]"`.
+Then open `http://127.0.0.1:8765` if the browser does not open automatically.
 
-Open `http://127.0.0.1:8765` in Chrome or Safari.
-
-To stop OpenMopa, return to the Terminal window and press `Control-C`.
-
-Before connecting to a machine, you can check USB/runtime visibility without
-sending laser commands:
+Next time, start it with:
 
 ```bash
-openmopa detect
+cd OpenLaser
+source .venv/bin/activate
+openlaser ui
 ```
 
-OpenMopa includes a default machine profile at `profiles/openmopa-machine.ini`,
-so most people do not need to configure anything before first launch. If your
-machine has a different field size or frequency range, copy the bundled profile,
-edit the copy, and run with `--profile`:
+## How to use OpenLaser — your first job
 
-```bash
-cp profiles/openmopa-machine.ini profiles/my-machine.ini
-openmopa ui --profile profiles/my-machine.ini
-```
+The normal workflow is:
 
-You can also set a custom profile once per Terminal session:
+**Choose a machine → import artwork → position it → choose layers → enter
+settings → plan → frame/verify → run or export.**
 
-```bash
-export OPENMOPA_PROFILE="profiles/my-machine.ini"
-openmopa ui
-```
+### Step 1: Choose your machine
 
-### About OpenMopa.app
+Use the **Machine** menu at the top of the screen.
 
-`Install OpenMopa.command` builds `OpenMopa.app` for you (developers can do the
-same by hand with `osacompile -o "OpenMopa.app" scripts/launcher.applescript`).
-The app opens a Terminal window for the server and opens your browser at
-`http://127.0.0.1:8765`. If the server is already running, it just opens the
-browser without starting a second server.
+- Choose **JPT M7 MOPA · 200 mm galvo** for the original OpenMopa fiber setup.
+- Choose **CO₂ cutter · GRBL 600 × 400 mm** for a GRBL CO₂ machine.
+- Choose **Diode laser · GRBL 400 × 400 mm** for a GRBL diode machine.
+- Choose **Pen plotter · GRBL A4** for the built-in A4 plotter profile.
 
-`OpenMopa.app` must stay in the project folder because it finds the project
-relative to its own location. Drag it to the Dock rather than copying it to
-`/Applications/`.
+The canvas changes to the selected machine's work area. Choosing the correct
+machine is important because OpenLaser rejects artwork outside that area.
 
-## Interface preview
+### Step 2: Import your artwork
 
-<p align="center">
-  <img src="assets/OpenMopaUI.png" alt="OpenMopa user interface" width="900">
-</p>
+1. Find **Import** in the left panel.
+2. Click **Choose File**.
+3. Select an `.svg`, `.dxf`, or `.stl` file.
+4. Wait for the artwork to appear on the canvas.
+5. Click **Fit** if the artwork is off-screen or very small.
 
-## Platform support
+DXF is the most complete CAD import path. Basic SVG line commands are supported,
+but SVG Bezier curves and arc commands are not flattened yet. If a complicated
+SVG imports incorrectly, convert its curves to polylines in your design program
+or export DXF.
 
-- **macOS:** supported today and used for active development.
-- **Windows:** not validated yet. The browser UI and Python package should be
-  portable, but hardware USB access and packaging still need testing.
-- **Linux:** not validated yet. The browser UI and Python package should be
-  portable, but hardware USB permissions/runtime setup still need testing.
+### Step 3: Select and position the artwork
 
-Until Windows and Linux hardware paths are tested, treat them as experimental
-and use dry-run / preview workflows only.
+- Click an object to select it.
+- Shift-click to add or remove objects from the selection.
+- Drag an empty area to draw a selection window.
+- Double-click a line to select its connected shape.
+- Use **X mm** and **Y mm** to position selected artwork.
+- Use **Scale** to resize it.
+- Use **Rotate deg** to rotate it.
+- Click **Center Selection** to put the selected artwork at the bed center.
+- Press Delete or Backspace to remove selected artwork.
+- Use the mouse wheel to zoom.
+- Hold Space and drag to pan.
+- Press `f` to fit the artwork on screen.
+- Press `0` to return to the full machine view.
+- Use Command-Z to undo and Shift-Command-Z to redo on macOS.
+
+The design coordinate origin is the center of the displayed work area.
+OpenLaser converts it to the positive coordinates used by GRBL during export.
+
+### Step 4: Put artwork on a layer
+
+Layers tell OpenLaser what to do with each object.
+
+1. Select one or more objects.
+2. Click the desired row in **Cuts / Layers**.
+3. Click the arrow button marked **→**.
+
+The default layers are:
+
+| Layer | Meaning |
+| --- | --- |
+| Vector Engrave | Follow the imported lines with the laser/tool |
+| Vector Cut / Deep Mark | Follow the imported lines, normally more slowly or with more passes |
+| Raster | Fill closed shapes with closely spaced scan lines |
+| Frame Only | Include the shape while framing, but do not output it while marking |
+
+You can rename layers, change their color, reorder them, hide them, or disable
+their output.
+
+### Step 5: Choose the layer settings
+
+Click a layer to edit its settings.
+
+- **Mode:** vector engrave, vector cut, raster engrave, frame only, or disabled.
+- **Speed mm/s:** how fast the tool moves while working.
+- **Power %:** laser output from 0 to 100 percent.
+- **Passes:** how many times to repeat the path.
+- **Frequency kHz:** MOPA pulse frequency. Only shown for compatible machines.
+- **Pulse ns:** MOPA pulse width. Only shown for compatible machines.
+- **Pitch mm:** distance between raster fill lines. Smaller values produce more
+  lines and a longer job.
+- **Hatch angle:** direction of raster fill lines.
+- **Angle step/pass:** rotation added to the hatch angle on each raster pass.
+- **Air assist:** emits `M8`/`M9` for compatible GRBL laser profiles.
+
+There is no universal safe power or speed. Correct values depend on the exact
+laser, material, focus, lens, cooling, air assist, and desired result. Start
+with a small test piece and settings recommended by your machine or material
+supplier. Do not copy MOPA settings into a CO₂ or diode machine.
+
+For a pen plotter, laser power, frequency, and pulse width are hidden because
+the pen does not use them.
+
+### Step 6: Plan the job
+
+Click **Plan Job** before every run or export.
+
+Planning checks:
+
+- Whether there is usable geometry.
+- Which layers will produce output.
+- The job's bounding box.
+- Layer settings.
+- Whether every point fits inside the selected machine.
+- MOPA emission safety requirements when using direct control.
+
+Read the **Activity** and **Job Summary** panels. Fix every reported error before
+continuing.
+
+### Step 7A: Run a MOPA job directly
+
+This path is only for the built-in JCZ/LMC JPT M7 profile.
+
+1. Make sure the machine, enclosure, extraction, and safety equipment are ready.
+2. Connect USB and power on the machine.
+3. Click **Frame Once** to trace the job with the red aiming light.
+4. Confirm the frame is entirely inside the fixture/material.
+5. Recheck every layer's power, frequency, pulse width, speed, and passes.
+6. Type `ARM` exactly in the ARM box.
+7. Click **Mark Job**.
+8. Read the final confirmation dialog.
+9. Confirm only when the area is safe and you are ready for emission.
+10. Stay with the machine until the job finishes.
+
+Use **Start Continuous Frame** only while positioning. Click **Stop Frame** when
+finished. Use the red **STOP ENGRAVING** button if the job must stop immediately.
+
+### Step 7B: Export a CO₂ or diode laser job
+
+OpenLaser currently creates the job file; your normal GRBL sender communicates
+with the machine.
+
+1. Click **Plan Job** and correct every error.
+2. Click **Export G-code**.
+3. Save the `.gcode` file somewhere easy to find.
+4. Open your trusted GRBL sender.
+5. Connect the sender to the correct machine and serial port.
+6. Load the exported `.gcode` file.
+7. Confirm units are millimetres and the job fits the machine bed.
+8. Use the sender's frame/boundary feature with the laser safely disabled or at
+   its approved framing power.
+9. Recheck origin, focus, material, ventilation, cooling, and air assist.
+10. Start the job from the sender and remain with the machine.
+
+The CO₂ profile uses constant-power `M3`. The diode profile uses dynamic-power
+`M4`. Laser power is scaled to the built-in GRBL range of `S0` through `S1000`.
+Confirm that this matches your controller's `$30` configuration before use.
+
+### Step 7C: Export a pen plotter job
+
+1. Select **Pen plotter · GRBL A4**.
+2. Import and position the artwork.
+3. Assign it to an output layer and set speed/passes.
+4. Click **Plan Job**.
+5. Click **Export G-code**.
+6. Load the file in your GRBL sender.
+7. Test pen-up and pen-down commands with the pen away from the paper.
+8. Frame or dry-run the movement.
+9. Install the pen and start the job.
+
+The built-in plotter profile uses `M3 S1000` for pen down and `M5` for pen up.
+Plotter firmware and servo arrangements vary. Verify those commands on your
+machine before allowing the pen to touch the paper.
+
+## Raster engraving explained simply
+
+Vector modes follow the outlines in your file. Raster mode fills the inside of
+a closed shape with parallel lines.
+
+For raster fill to work:
+
+1. The shape must be closed; its final point must return to its first point.
+2. The Raster layer must have **Output** enabled.
+3. Pitch must be greater than zero.
+
+Open raster paths are skipped and reported. A smaller pitch creates more fill
+lines, higher density, and a longer job.
+
+## Selected-only jobs, mirroring, and repeats
+
+- Enable **Selected only** to plan, frame, mark, or export only selected objects.
+- Enable horizontal or vertical mirroring when the job or material requires it.
+- Use **Repeat** to repeat the full job. Be extremely careful with repeat counts
+  on lasers because heat accumulates between repetitions.
+
+## Calibration for the MOPA galvo
+
+The Advanced panel includes **Scale correction** for the direct MOPA profile.
+
+1. Mark a square of a known intended size.
+2. Measure the actual marked square accurately.
+3. Calculate `measured size ÷ intended size`.
+4. Enter that number as Scale correction.
+
+Example: a 50 mm square measures 59.17 mm. Enter `1.1834`.
+
+Calibration is stored locally in `calibration.json`. OpenLaser does not modify
+your original JCZ correction or mark configuration files.
+
+## Where OpenLaser saves your work
+
+OpenLaser keeps these files beside the project:
+
+- `workspace.json`: imported objects and their transforms.
+- `layer_settings.json`: layer names, modes, and parameters.
+- `calibration.json`: local MOPA scale correction.
+
+These machine-local files are ignored by Git. The workspace is saved
+automatically after changes.
 
 ## Troubleshooting
 
-- **macOS blocks `Install OpenMopa.command` ("cannot verify the developer"):**
-  right-click (or Control-click) the file and choose **Open**, then **Open**
-  again in the dialog. This is standard macOS Gatekeeper behavior for files
-  downloaded from the internet.
-- **The installer says Python was not found:** download Python from
-  [python.org/downloads](https://www.python.org/downloads/), run that
-  installer, then double-click `Install OpenMopa.command` again.
-- **`openmopa: command not found`:** activate the virtual environment again with
-  `source .venv/bin/activate`, then retry `openmopa ui`.
-- **Browser does not open:** manually open `http://127.0.0.1:8765`.
-- **Hardware not detected:** reconnect USB/power, try another cable/adapter,
-  then run `openmopa detect` again.
-- **Hardware job timed out / wedged controller:** the BJJCZ LMC board can
-  still enumerate on USB and accept connections while never answering reads.
-  This can happen if a hardware job is killed mid-USB-transfer and the board
-  waits forever for the rest of a packet. Fully power-cycle the machine:
-  turn it off, wait about 15 seconds, then turn it on again. Replugging USB is
-  not enough because the board is powered by the machine, not the USB cable.
-- **Red "Server connection lost" banner:** the UI server process died, usually
-  because its Terminal window was closed. Restart with
-  `./.venv/bin/python -m mopa_luiz ui`; the page reconnects automatically.
-- **Buttons doing nothing:** check the Activity panel in the bottom-right
-  corner. Every failure now surfaces an explicit reason there.
+### macOS says the installer cannot be opened
 
-Desktop / package icons are in `assets/icons/`:
+Right-click **Install OpenLaser.command**, choose **Open**, and then choose
+**Open** again in the warning dialog. Double-clicking alone may be blocked by
+Gatekeeper the first time.
 
-- `openmopa.icns` for macOS.
-- `openmopa.ico` for Windows.
-- `openmopa.png` plus sized PNGs for Linux and Docker/Desktop launchers.
+### The installer says Python is missing
 
-## Command line
+Install Python from [python.org/downloads](https://www.python.org/downloads/),
+then run **Install OpenLaser.command** again.
+
+### The browser did not open
+
+Leave the OpenLaser Terminal window running and manually open:
+
+```text
+http://127.0.0.1:8765
+```
+
+### The page says “Server connection lost”
+
+The Terminal window running OpenLaser was probably closed. Start
+`OpenLaser.app` again.
+
+### `openlaser: command not found`
+
+Activate the private environment first:
 
 ```bash
-openmopa detect
-openmopa show-config
-openmopa pulse-widths
-openmopa inspect-profile
-openmopa plan-test-box --power 100 --frequency-khz 30 --pulse-width-ns 200
-openmopa ui
+cd OpenLaser
+source .venv/bin/activate
+openlaser ui
 ```
 
-## Safety policy
+### MOPA hardware is not detected
 
-All laser-emission paths flow through one safety gate before the controller is
-touched.
-
-- Power may be set anywhere in the laser's electrical 0..100% range.
-- Pulse width is snapped to the machine profile's pulse-width table (JPT M7
-  table by default); values that don't land on the table within rounding are
-  rejected.
-- Frequency must lie within the machine profile's `MINPWMFREQ` / `MAXPWMFREQ` bounds.
-- Live marking still requires typing `ARM` in the UI plus a final
-  confirmation in the modal.
-- Use red-light framing (Frame Once / Continuous Frame) before marking.
-- Raster engrave layers emit hatch-fill scan lines for closed regions.
-  Open raster paths are skipped and reported.
-- Stop and timeout paths abort the board cleanly, including stopping
-  execution and closing MO, before the job process exits.
-
-## UI features
-
-Run with the generated `.app` (above) or with
-`openmopa ui`, then open
-`http://127.0.0.1:8765`.
-
-**Import**
-
-- `.svg`, `.dxf`, `.stl`.
-- DXF supports `LINE`, `LWPOLYLINE` including bulge arcs, old-style
-  `POLYLINE` / `VERTEX` / `SEQEND`, `CIRCLE`, `ARC`, `ELLIPSE`, fit-point
-  `SPLINE`, and control-point `SPLINE` approximation. DXF imports preserve
-  CAD Y-up orientation, which is important for Rhino exports.
-- Imported paths are split into separately selectable objects so individual
-  DXF lines can be assigned to different layers.
-- SVG paths only handle `M / L / H / V / Z`; Bezier and arc commands are
-  not flattened in this prototype.
-
-**Canvas**
-
-- 200 mm field with a self-scaling ruler: tick marks every 1 / 2 / 5 / 10
-  / 20 / 50 / 100 mm depending on zoom, mm labels along the bottom and
-  left edges, plus a labelled scale bar in the lower-right corner.
-- Mouse-wheel zoom (cursor-anchored), `Fit` / `100%` buttons, zoom
-  percentage readout, mm cursor readout.
-- Switch between `Cursor` and `Pan` with the in-canvas buttons. Pan also
-  works with middle-mouse drag, or hold Space and drag with the left button.
-- Collapse either sidebar with the in-canvas edge buttons.
-- `Undo` / `Redo` buttons plus `Cmd-Z` / `Shift-Cmd-Z` for geometry edits.
-- `f` fits to objects, `0` resets to 100% / field view.
-
-**Calibration**
-
-- Advanced → `Scale correction` stores measured÷intended from a test square
-  in a machine-local, git-ignored `calibration.json`. The correction scales
-  every job, and the canvas Field readout shows the corrected work area.
-- `Mirror horizontally` and `Mirror vertically` in the right panel apply to
-  planning, framing, and marking. The toggles persist in the browser's
-  `localStorage`.
-
-**Selection**
-
-- Click an object on the canvas or in the list. Shift-click adds or removes
-  from the selection.
-- Drag an empty part of the canvas to window-select every object whose
-  bounding box is fully inside the selection rectangle. Shift-drag adds to the
-  current selection.
-- Double-click a line/object to select its connected endpoint component. This
-  selects closed rectangles, polygons, stars, and other edge-connected chains
-  without selecting unrelated crossing lines that only intersect mid-segment.
-- `Delete` / `Backspace` removes the selection.
-- The object browser is intentionally capped and scrollable so large DXF
-  imports do not push layer/edit controls off-screen.
-- The Transform panel applies to the single-selected object.
-- Center Selection, Center All, and Move Center To Ref move selected geometry
-  around explicit reference coordinates.
-
-**Layers**
-
-Four default layers; each has independent operation, power, frequency,
-pulse, speed, passes, output, visibility, and color.
-
-| Layer                   | Operation        | Defaults                |
-| ----------------------- | ---------------- | ----------------------- |
-| Vector Engrave          | `vector_engrave` | 100% / 30 kHz / 200 ns / 1000 mm·s |
-| Vector Cut / Deep Mark  | `vector_cut`     | 100% / 30 kHz / 200 ns / 300 mm·s  |
-| Raster                  | `raster_engrave` | hatch fill, 0.1 mm pitch, angle 0°, +90° per pass |
-| Frame Only              | `frame_only`     | no emission             |
-
-- `Move selection here` in the Cuts / Layers module moves selected objects
-  onto the active layer.
-- Layer settings persist locally in `layer_settings.json`, which is ignored by git.
-- The right-panel `Selected only` toggle limits planning, red-light framing,
-  continuous framing, and marking to the current canvas selection.
-
-**Raster fill (hatch / fill engraving)**
-
-Raster layers fill closed regions with hatch lines instead of tracing the
-outline. The algorithm matches the common laser/CAD hatch-fill workflow:
-
-1. Closed polylines are detected (a path that returns to its start within
-   tolerance). Open paths on a raster layer are skipped — the UI reports
-   them but the laser does nothing.
-2. Each closed shape is rotated so the chosen hatch angle becomes
-   horizontal.
-3. Horizontal scan lines sweep across the bounding box at `pitch_mm`
-   spacing. Each scan line records the X positions where it crosses any
-   region boundary.
-4. The crossings are sorted, then paired even-odd: 0..1 is inside, 1..2
-   is in a hole, 2..3 is inside again, etc. This is the same fill rule
-   SVG and most CAD tools use; **letter holes (the inside of an "O", the
-   triangular hole of an "A") are skipped naturally** because the scan
-   line crosses the inner boundary an even number of times.
-5. Hatch segments are rotated back to world coordinates.
-6. For multi-pass output, the angle is incremented by `angle_step_deg`
-   per pass: pass 1 at 0°, pass 2 at 90° gives a cross-hatch fill.
-7. Boustrophedon ordering — the direction of every other scan line is
-   flipped so the galvo doesn't fly all the way back to the start of
-   each row, cutting jump-time roughly in half.
-
-Raster controls in the layer panel:
-
-| Field               | Meaning                                    |
-| ------------------- | ------------------------------------------ |
-| `Hatch angle deg`   | Direction of the first pass (0° = horizontal) |
-| `Pitch mm`          | Distance between adjacent hatch lines      |
-| `Angle step / pass` | Degrees added per pass (90° = cross-hatch) |
-| `Passes`            | Number of passes (uses the same field as vector layers) |
-
-The canvas shows a live preview overlay of the resulting hatch lines for
-every visible raster layer with `output=yes`. The job summary surfaces a
-`Raster lines` count.
-
-**Editing**
-
-- `Group Selected` turns multiple selected objects into one transformable
-  object while preserving the original paths.
-- `Ungroup` explodes a grouped or multi-path object back into separately
-  selectable paths.
-- `Join Connected Lines` replaces the selected fragments with joined paths
-  using a configurable mm tolerance. Algorithm: endpoint-graph clustering,
-  chain merge through degree-≤2 nodes, branch (degree>2) split, closed-loop
-  detection.
-
-**Job summary** (right panel, live)
-
-- Object count, selected count, layer count, path count.
-- Bounding box in mm.
-- Power %, frequency kHz, pulse ns, speed mm/s.
-- ARM typed yes/no.
-- Frame settings for red-light framing.
-- Selected-only scope and repeat count for live marking.
-- Whether emission will occur.
-- Per-layer object and path counts plus operation.
-- Layer-validation errors are listed and disable Mark Job.
-
-**Marking**
-
-- `Plan Job` returns a dry-run summary including a per-layer breakdown,
-  bounding box, and the safety verdict.
-- `Frame Once` / `Start Continuous Frame` / `Stop Frame` use the red-light
-  guide for visible-only framing of layers that are visible and not
-  disabled. When `Selected only` is checked, framing uses only selected
-  canvas objects.
-- `Mark Job` is gated by ARM, the safety policy, and a final confirmation
-  modal. Emission runs per emitting layer in declared layer order, with
-  per-layer parameters.
-- `Selected only` applies to marking too: select the vectors to burn, enable
-  the toggle, then frame/mark only that subset.
-- `Repeat` defaults to `1`. Values above `1` repeat the complete mark
-  sequence one after another; for example, `5` marks the same selected/all
-  job five times. Layer-level passes still apply inside each repeat.
-- `STOP ENGRAVING` stops continuous framing and terminates the active
-  isolated hardware job process.
-- **First-Burn Helpers**: `Test Dot` and `5 mm Line`. Both default
-  to 100% power, 30 kHz, 200 ns, 1000 mm·s. Both go through the same
-  ARM + confirmation modal.
-
-**Hardware reliability and diagnostics**
-
-- The UI polls `GET /api/health` every 3 seconds using pyusb enumeration only,
-  without opening the device, so it is safe during running jobs. If the server
-  is lost, a fixed red banner disables hardware buttons, shows the last-contact
-  counter and restart command, then reconnects automatically with a green flash
-  and re-syncs safety/config. The header chip updates between `JCZ/LMC USB
-  connected`, `Laser not detected — check power/USB`, and `Mock mode — no
-  hardware`.
-- One-shot frame and mark operations are submitted to `galvoplotter`'s
-  spooler before waiting for motion completion.
-- Native JCZ/USB hardware calls for one-shot frame, mark, and first-burn tests
-  are isolated in a child process. If the native driver segfaults, the UI
-  server remains alive and reports a request error instead of leaving Chrome
-  with `TypeError: Failed to fetch`.
-- Controller wait timeouts avoid killing the galvo spooler thread during
-  post-job cleanup.
-- Job processes catch SIGTERM and abort the board cleanly before exiting. Hard
-  kill only happens after that graceful window.
-- Connects run under a 12 second deadline. If the interface claims but the
-  board does not answer, the error reports a wedged controller and tells you to
-  power-cycle the laser. Timeout errors carry the same power-cycle hint.
-- Frame and test-run requests clear a prior emergency stop and stop a running
-  frame loop before dispatching, so Stop no longer permanently blocks framing
-  until restart.
-- The Activity panel now displays JavaScript `Error` messages and non-JSON
-  server responses instead of rendering empty `{}` objects.
-
-**Profile inspection**
-
-- The Profile panel shows the parsed machine profile keys.
-- `Inspect Profile Usage` (and the `inspect-profile` CLI) classify each
-  known field as `applied`, `parsed but not applied`, or `not found`.
-
-## Tests
+1. Check machine power.
+2. Reconnect the USB cable.
+3. Try another cable or USB adapter.
+4. Activate the environment and run:
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v
+openlaser detect
 ```
 
-76 stdlib `unittest` cases. Covers:
+Detection does not send laser commands.
 
-- machine profile parsing and missing-section error
-- DXF import: `LINE`, `LWPOLYLINE`, old-style `POLYLINE`/`VERTEX`/`SEQEND`,
-  and normalized import output
-- pulse-width snap to JPT M7 table
-- profile-driven pulse-width tables with JPT M7 fallback
-- scale-correction calibration load/save and effective field size
-- frequency-bound rejection
-- 0..100% power-range enforcement
-- ARM rejection (`arm=False` and wrong-token cases)
-- raster passes the safety gate, raster pitch validation
-- empty-job rejection
-- per-layer validation including raster pitch / angle sanity
-- `group_by_layer` ordering and bucket assignment
-- join-lines algorithm: touching, gap-within-tolerance, gap-too-large,
-  square-from-four-segments → closed loop, T-junction split, internal
-  vertices preserved, empty input
-- raster fill: square, donut hole skipped, cross-hatch doubles line count,
-  90° angle gives vertical lines, open paths skipped, pitch must be > 0
-- planner end-to-end via the HTTP handler: plan groups by layer, mark
-  blocked without ARM, layers allow power up to 100%, mark runs once per
-  emitting layer, raster layer emits hatch lines for closed shapes, skips
-  open paths, and hardware execution is patched at the isolated job boundary
-- end-to-end command-chain smoke tests over HTTP in mock mode: frame, mark
-  reaching the galvo layer, and `/api/health`
-- regression: frame works again after an emergency stop
-- wedged-board connect deadline raises the power-cycle diagnosis
-- graceful SIGTERM stop shuts the controller down cleanly
+### The JCZ/LMC controller connects but does not respond
 
-### Mock mode (no hardware)
+The controller can become wedged if a process stops during a USB transfer.
+Turn the complete laser machine off, wait at least 15 seconds, and turn it on
+again. Unplugging only the USB cable is not enough because the controller is
+powered by the machine.
 
-`OPENMOPA_MOCK=1 openmopa ui` runs the whole chain against galvoplotter's
-`MockConnection`: HTTP routes, safety gates, job process spawning, and galvo
-command generation. No hardware is needed. Job results carry `"mock": true` so
-they cannot be mistaken for real runs.
+### Export says geometry is outside the work area
 
-The same environment variable works with any command:
+OpenLaser intentionally refuses to clip the job. Select the correct machine,
+then move or scale the artwork until it is fully inside the visible bed.
+
+### Raster produces no lines
+
+The source shape is probably open. Join its endpoints in your CAD program or
+use **Join Connected Lines** with an appropriate tolerance.
+
+### The plotter does not lift or lower the pen
+
+Your controller may use different servo commands. The built-in profile expects
+`M3 S1000` for down and `M5` for up. Test safely and customize the machine
+profile in code before running a real drawing.
+
+## Command-line tools
+
+Activate `.venv` before using these commands.
 
 ```bash
-OPENMOPA_MOCK=1 openmopa ui
+openlaser machines
+openlaser detect
+openlaser show-config
+openlaser pulse-widths
+openlaser inspect-profile
+openlaser plan-test-box --power 10 --frequency-khz 30 --pulse-width-ns 200
+openlaser ui
 ```
 
-## Roadmap
+`openmopa` remains available as a compatibility alias, but new documentation
+uses `openlaser`.
 
-- More MOPA fiber sources: per-machine profiles (`FIELDSIZE`, frequency
-  bounds, and now `PULSEWIDTHS`) can describe tested machines. Contributions
-  of tested profiles under `profiles/` are welcome.
-- UI pulse-width presets are still the M7 list; making the UI read the profile
-  table is a next step.
-- CO2 laser cutters are out of scope for now. Different control boards
-  (Ruida/GRBL) mean a separate motion backend behind the same job/safety
-  model; this is tracked as a design goal with no timeline.
+## Test without hardware
 
-## Project layout
+Mock mode exercises the MOPA software chain without contacting a real board:
 
-```
-.
-├── README.md
-├── LICENSE
-├── SECURITY.md
-├── Install OpenMopa.command    one-step installer: venv + deps + OpenMopa.app
-├── pyproject.toml
-├── assets/
-│   └── icons/                 macOS .icns, Windows .ico, Linux/Docker PNGs
-├── profiles/
-│   └── openmopa-machine.ini   bundled 200 mm JPT M7 machine profile
-├── mopa_luiz/
-│   ├── __init__.py
-│   ├── __main__.py
-│   ├── cli.py                  detect / show-config / plan-test-box / inspect-profile / ui
-│   ├── safety.py               evaluate_emission, ARM gate, layer validation
-│   ├── geometry.py             join_lines, bounding_box
-│   ├── layers.py               LayerSpec, default layers, group_by_layer
-│   ├── profile.py              inspect (applied / parsed-unused / not-found)
-│   ├── importers.py            SVG / DXF / STL → polylines
-│   ├── live.py                 galvoplotter wrappers, child-process hardware jobs, safety gates
-│   ├── raster.py               hatch fill: scan-line, even-odd, boustrophedon
-│   └── ui.py                   stdlib HTTP server + single-page UI
-├── scripts/
-│   ├── launcher.applescript    source for OpenMopa.app
-│   └── create_openmopa_assets.py
-└── tests/
-    ├── test_calibration.py
-    ├── test_config.py
-    ├── test_geometry.py
-    ├── test_importers.py
-    ├── test_layers.py
-    ├── test_live_chain.py
-    ├── test_planner.py
-    ├── test_raster.py
-    └── test_safety.py
+```bash
+OPENMOPA_MOCK=1 openlaser ui
 ```
 
-## Files intentionally not committed
+Results clearly report `"mock": true`.
 
-- Local machine profiles and calibration files: `markcfg*`, `*.cor`.
-- User job/design files: `*.ezd`, `*.dxf`, `*.svg`, `*.stl`.
-- Local UI state: `layer_settings.json`.
-- Generated launcher bundles: `*.app/`.
+## Supported platforms
 
-## Hardware
+- **macOS:** primary development and packaging platform.
+- **Windows:** browser UI should be portable, but USB and packaging still need
+  hardware validation.
+- **Linux:** browser UI should be portable, but USB permissions and hardware
+  paths still need validation.
 
-- Expected JCZ/LMC USB id: `0x9588:0x9899`.
-- Base library: `galvoplotter` (`galvo.controller.GalvoController`).
-- Protocol reference: Balor.
-- Pulse-width guardrail reference: JPT M7 pulse-width table.
-- Material library tools for later: `fibrelasertools`, `LaserParamsConverter`.
-- Known failure mode: wedged controller — see Troubleshooting.
+Treat Windows and Linux machine control as experimental until tested with the
+specific hardware.
 
-## Known limitations
+## Safety rules enforced by OpenLaser
 
-- Raster fill works for closed polylines only. Open paths on a raster
-  layer are skipped (the UI surfaces them in the activity log).
-- Raster fills curves by scan-line over their polyline approximation;
-  there is no analytic curve handling. Increase your import resolution
-  if a circle/ellipse looks faceted.
-- SVG path parser handles `M / L / H / V / Z` only — Bezier and arc
-  commands are not flattened in this prototype.
-- Join Lines mutates the object's polylines in place (and resets
-  transform to identity, since the joined polylines are now in world
-  coordinates). Codex added a Cmd-Z / Shift-Cmd-Z undo stack covering
-  geometry edits.
-- The `m_bEnableIPGSetPulseWidth`, `m_nEnableFiberLaserStateCheckInMarking`,
-  delay fields, axis flips, and correction-file references in machine profiles
-  are parsed but not applied. The `inspect-profile` report says so
-  explicitly per field.
+For direct MOPA emission:
+
+- Power must be between 0 and 100 percent.
+- Frequency must be inside the machine profile limits.
+- Pulse width must match the machine profile's allowed table.
+- At least one markable path must exist.
+- The operator must type `ARM`.
+- A final confirmation is required before emission.
+
+For GRBL export:
+
+- Coordinates must be finite.
+- Every coordinate must fit inside the selected work area.
+- Layer power must be between 0 and 100 percent.
+- Layer speed must be greater than zero and is capped to the machine profile.
+- The generated file begins in millimetres and absolute coordinate mode.
+- Tool-off commands are inserted before travel and at the end of the job.
+
+Software checks do not replace machine interlocks, enclosure switches,
+ventilation, fire prevention, training, or operator attention.
+
+## Current limitations
+
+- Direct USB control currently targets the original JCZ/LMC MOPA setup only.
+- GRBL CO₂, diode, and plotter jobs are exported rather than streamed directly.
+- Ruida DSP controllers are not supported.
+- Built-in gantry bed sizes and plotter commands are not yet editable in the UI.
+- SVG import supports line-oriented `M`, `L`, `H`, `V`, and `Z` paths; complex
+  curves should be flattened before import.
+- Windows and Linux hardware paths need real-machine validation.
+
+## Development
+
+Run the complete test suite with:
+
+```bash
+source .venv/bin/activate
+python -m unittest discover -v
+```
+
+Important modules:
+
+```text
+mopa_luiz/machines.py   built-in machine profiles and capabilities
+mopa_luiz/gcode.py      GRBL laser and plotter G-code compiler
+mopa_luiz/layers.py     layer model and operation grouping
+mopa_luiz/raster.py     hatch-fill generation
+mopa_luiz/safety.py     direct-emission safety policy
+mopa_luiz/live.py       JCZ/LMC direct-control path
+mopa_luiz/ui.py         local HTTP server and browser interface
+```
+
+The Python package still uses the internal `mopa_luiz` name for compatibility
+with the original OpenMopa codebase.
+
+## License and security
+
+OpenLaser is released under the [MIT License](LICENSE).
+
+Please read [SECURITY.md](SECURITY.md) before reporting a security issue.

@@ -3,14 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openmopa"
-version = "0.1.0"
-description = "Safety-first open-source MOPA/galvo laser controller prototype."
+name = "openlaser"
+version = "0.2.0"
+description = "Safety-first open-source workspace for galvo lasers, gantry lasers, and pen plotters."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Luiz Bueno" }]
-keywords = ["mopa", "galvo", "laser", "jcz", "lmc", "lightburn", "ezcad"]
+keywords = ["mopa", "co2", "diode", "plotter", "grbl", "galvo", "laser", "jcz", "lmc"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: MacOS X",
@@ -26,6 +26,7 @@ hardware = ["pyusb"]
 dev = []
 
 [project.scripts]
+openlaser = "mopa_luiz.cli:main"
 openmopa = "mopa_luiz.cli:main"
 
 [tool.setuptools]

@@ -75,6 +75,7 @@ class PlanAndMarkTests(unittest.TestCase):
 
     def _payload(self, *, objects=None, live=None, layers=None):
         return {
+            "machine_id": "jpt-m7-200",
             "objects": objects if objects is not None else [
                 {"layer_id": "vector-engrave", "polylines": [[(0, 0), (5, 0), (5, 5), (0, 0)]]},
             ],
@@ -98,6 +99,25 @@ class PlanAndMarkTests(unittest.TestCase):
         self.assertEqual(result["status"], 200)
         self.assertEqual(result["payload"]["object_count"], 0)
         self.assertEqual(result["payload"]["emitting_layers"], 0)
+
+    def test_diode_plan_and_export_use_gcode_without_mopa_safety_fields(self):
+        payload = self._payload()
+        payload["machine_id"] = "diode-grbl-400x400"
+        result = call_post(self.handler_cls, "/api/plan", payload)
+        self.assertEqual(result["status"], 200)
+        self.assertTrue(result["payload"]["safety"]["ok"])
+        self.assertEqual(result["payload"]["mode"], "gcode-preview")
+
+        exported = call_post(self.handler_cls, "/api/export/gcode", payload)
+        self.assertEqual(exported["status"], 200)
+        self.assertIn("M4 S", exported["payload"]["content"])
+
+    def test_direct_mark_is_refused_for_export_only_machine(self):
+        payload = self._payload()
+        payload["machine_id"] = "plotter-grbl-a4"
+        result = call_post(self.handler_cls, "/api/mark", payload)
+        self.assertEqual(result["status"].value, 400)
+        self.assertIn("export G-code", result["payload"]["error"])
 
     def test_mark_blocked_without_arm(self):
         payload = self._payload(live={

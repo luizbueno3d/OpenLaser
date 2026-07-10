@@ -1,3 +1,3 @@
-"""Dry-run-first helpers for a JPT M7 MOPA JCZ/LMC laser stack."""
+"""OpenLaser: one safety-first workspace for light and motion tools."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

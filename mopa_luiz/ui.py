@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from .cli import build_test_box_plan, config_summary, detect_report, load_markcfg, pyusb_probe
 from .geometry import bounding_box, join_lines
+from .gcode import compile_gcode
 from .importers import import_geometry
 from .raster import hatch_polylines
 from .layers import (
@@ -37,6 +38,7 @@ from .live import (
     save_scale_correction,
     mock_mode,
 )
+from .machines import machine_by_id, machine_catalog
 from .profile import inspect as inspect_profile_data
 from .safety import evaluate_emission
 
@@ -151,7 +153,7 @@ HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OpenMopa</title>
+  <title>OpenLaser</title>
   <style>
     :root {
       color-scheme: dark;
@@ -213,6 +215,17 @@ HTML = """<!doctype html>
     }
     header .pill.warning { color: var(--accent2); border-color: var(--accent2); }
     header .pill.bad { color: var(--bad); border-color: var(--bad); }
+    .brandLockup { display: flex; align-items: baseline; gap: 9px; white-space: nowrap; }
+    .brandLockup small {
+      color: var(--muted); font: 600 10px SFMono-Regular, Consolas, monospace;
+      letter-spacing: .08em; text-transform: uppercase;
+    }
+    .machineRail {
+      display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 10px;
+      border-left: 3px solid var(--accent2); background: #151a1b;
+    }
+    .machineRail label { display: block; margin: 0; color: var(--accent2); }
+    .machineRail select { min-height: 30px; min-width: 245px; border-radius: 3px; }
     .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
     .ok .dot { background: var(--good); }
     main {
@@ -630,8 +643,12 @@ HTML = """<!doctype html>
 <body>
   <div id="connBanner" role="alert"></div>
   <header>
-    <h1>OpenMopa</h1>
+    <div class="brandLockup"><h1>OpenLaser</h1><small>motion + light</small></div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <div class="machineRail">
+        <label for="machineSelect">Machine</label>
+        <select id="machineSelect" aria-label="Active machine profile"></select>
+      </div>
       <div id="status" class="pill"><span class="dot"></span><span>Checking USB</span></div>
       <div id="powerMode" class="pill">ARM required for emission</div>
     </div>
@@ -747,7 +764,7 @@ HTML = """<!doctype html>
       </section>
       <section>
         <h2>Job Controls</h2>
-        <label>ARM<input id="confirm" type="text" placeholder="Type ARM exactly"></label>
+        <label id="armControl">ARM<input id="confirm" type="text" placeholder="Type ARM exactly"></label>
         <div class="grid2">
           <label><input id="selectedOnly" type="checkbox"> Selected only</label>
           <label>Repeat<input id="markRepeat" type="number" min="1" max="999" step="1" value="1"></label>
@@ -758,6 +775,7 @@ HTML = """<!doctype html>
         </div>
         <div class="buttons">
           <button id="plan">Plan Job</button>
+          <button class="secondary" id="exportGcode">Export G-code</button>
           <button class="secondary" id="frame">Frame Once</button>
           <button class="secondary" id="frameStart">Start Continuous Frame</button>
           <button class="secondary" id="frameStop">Stop Frame</button>
@@ -765,7 +783,7 @@ HTML = """<!doctype html>
           <button class="danger" id="mark">Mark Job</button>
         </div>
       </section>
-      <section>
+      <section id="fiberAdvanced">
         <details>
           <summary><h2>Advanced</h2></summary>
           <div class="info">
@@ -826,8 +844,11 @@ HTML = """<!doctype html>
   <div id="layerMenu" class="contextMenu"></div>
 
   <script>
-    let FIELD_MM = 200;
+    let FIELD_W_MM = 200;
+    let FIELD_H_MM = 200;
     let fieldNominalMm = 200;
+    let machines = [];
+    let activeMachine = null;
     const PULSES = [2,4,6,9,13,20,30,45,55,60,80,100,150,200,250,300,350,400,450,500];
     const objects = [];
     let layers = [];
@@ -946,7 +967,9 @@ HTML = """<!doctype html>
       if (!response.ok) throw data;
       return data;
     }
-    function pixelsPerMm() { return (canvas.width / FIELD_MM) * zoom; }
+    function pixelsPerMm() {
+      return Math.min(canvas.width / FIELD_W_MM, canvas.height / FIELD_H_MM) * zoom;
+    }
     function mmToPx(x, y) {
       const s = pixelsPerMm();
       return [canvas.width / 2 + (x - viewX) * s, canvas.height / 2 - (y - viewY) * s];
@@ -992,8 +1015,14 @@ HTML = """<!doctype html>
       return [...selected].sort((a, b) => a - b).filter(i => i >= 0 && i < objects.length);
     }
     function drawGrid() {
-      ctx.fillStyle = '#d8d0be';
+      const halfW = FIELD_W_MM / 2;
+      const halfH = FIELD_H_MM / 2;
+      ctx.fillStyle = '#141819';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const [fieldLeft, fieldBottom] = mmToPx(-halfW, -halfH);
+      const [fieldRight, fieldTop] = mmToPx(halfW, halfH);
+      ctx.fillStyle = '#d8d0be';
+      ctx.fillRect(fieldLeft, fieldTop, fieldRight - fieldLeft, fieldBottom - fieldTop);
 
       // Pick a tick interval in mm based on current zoom so labels never crowd.
       const ppm = pixelsPerMm();
@@ -1007,37 +1036,42 @@ HTML = """<!doctype html>
       // Minor grid.
       ctx.strokeStyle = 'rgba(31,42,43,.10)';
       ctx.lineWidth = 1;
-      for (let mm = -100; mm <= 100; mm += minorMm) {
+      for (let mm = Math.ceil(-halfW / minorMm) * minorMm; mm <= halfW; mm += minorMm) {
         if (Math.abs(mm % majorMm) < 1e-6) continue;
-        const [x0, y0] = mmToPx(mm, -100);
-        const [x1, y1] = mmToPx(mm, 100);
+        const [x0, y0] = mmToPx(mm, -halfH);
+        const [x1, y1] = mmToPx(mm, halfH);
         ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
-        const [x2, y2] = mmToPx(-100, mm);
-        const [x3, y3] = mmToPx(100, mm);
+      }
+      for (let mm = Math.ceil(-halfH / minorMm) * minorMm; mm <= halfH; mm += minorMm) {
+        if (Math.abs(mm % majorMm) < 1e-6) continue;
+        const [x2, y2] = mmToPx(-halfW, mm);
+        const [x3, y3] = mmToPx(halfW, mm);
         ctx.beginPath(); ctx.moveTo(x2, y2); ctx.lineTo(x3, y3); ctx.stroke();
       }
 
       // Major grid.
       ctx.strokeStyle = 'rgba(31,42,43,.22)';
-      for (let mm = -100; mm <= 100; mm += majorMm) {
-        const [x0, y0] = mmToPx(mm, -100);
-        const [x1, y1] = mmToPx(mm, 100);
+      for (let mm = Math.ceil(-halfW / majorMm) * majorMm; mm <= halfW; mm += majorMm) {
+        const [x0, y0] = mmToPx(mm, -halfH);
+        const [x1, y1] = mmToPx(mm, halfH);
         ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
-        const [x2, y2] = mmToPx(-100, mm);
-        const [x3, y3] = mmToPx(100, mm);
+      }
+      for (let mm = Math.ceil(-halfH / majorMm) * majorMm; mm <= halfH; mm += majorMm) {
+        const [x2, y2] = mmToPx(-halfW, mm);
+        const [x3, y3] = mmToPx(halfW, mm);
         ctx.beginPath(); ctx.moveTo(x2, y2); ctx.lineTo(x3, y3); ctx.stroke();
       }
 
       // Field rectangle and crosshair.
       ctx.strokeStyle = '#1c2a2b';
       ctx.lineWidth = 2;
-      const [bx0, by0] = mmToPx(-100, -100);
-      const [bx1, by1] = mmToPx(100, 100);
+      const [bx0, by0] = mmToPx(-halfW, -halfH);
+      const [bx1, by1] = mmToPx(halfW, halfH);
       ctx.strokeRect(bx0, by1, bx1 - bx0, by0 - by1);
-      const [cx0, cy0] = mmToPx(-100, 0);
-      const [cx1, cy1] = mmToPx(100, 0);
-      const [cx2, cy2] = mmToPx(0, -100);
-      const [cx3, cy3] = mmToPx(0, 100);
+      const [cx0, cy0] = mmToPx(-halfW, 0);
+      const [cx1, cy1] = mmToPx(halfW, 0);
+      const [cx2, cy2] = mmToPx(0, -halfH);
+      const [cx3, cy3] = mmToPx(0, halfH);
       ctx.strokeStyle = 'rgba(11,28,29,.28)';
       ctx.beginPath(); ctx.moveTo(cx0, cy0); ctx.lineTo(cx1, cy1); ctx.moveTo(cx2, cy2); ctx.lineTo(cx3, cy3); ctx.stroke();
 
@@ -1048,8 +1082,8 @@ HTML = """<!doctype html>
       ctx.textBaseline = 'top';
       const padX = 4;
       const padY = 4;
-      for (let mm = -100; mm <= 100; mm += majorMm) {
-        const [x, y] = mmToPx(mm, -100);
+      for (let mm = Math.ceil(-halfW / majorMm) * majorMm; mm <= halfW; mm += majorMm) {
+        const [x, y] = mmToPx(mm, -halfH);
         if (x < 18 || x > canvas.width - 18) continue;
         // Tick mark.
         ctx.strokeStyle = '#1c2a2b';
@@ -1058,8 +1092,8 @@ HTML = """<!doctype html>
       }
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
-      for (let mm = -100; mm <= 100; mm += majorMm) {
-        const [x, y] = mmToPx(-100, mm);
+      for (let mm = Math.ceil(-halfH / majorMm) * majorMm; mm <= halfH; mm += majorMm) {
+        const [x, y] = mmToPx(-halfW, mm);
         if (y < 14 || y > canvas.height - 14) continue;
         ctx.strokeStyle = '#1c2a2b';
         ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - 6, y); ctx.stroke();
@@ -1340,9 +1374,10 @@ HTML = """<!doctype html>
                 ${['vector_engrave','vector_cut','raster_engrave','frame_only','disabled'].map(op => `<option value="${op}" ${op === active.operation ? 'selected':''}>${op}</option>`).join('')}
               </select></label>
               <label>Speed mm/s<input data-key="speed_mm_s" type="number" min="1" step="10" value="${active.speed_mm_s}"></label>
-              <label>Power %<input data-key="power_percent" type="number" min="0" max="100" step="0.1" value="${active.power_percent}"></label>
-              <label>Frequency kHz<input data-key="frequency_khz" type="number" min="1" step="1" value="${active.frequency_khz}"></label>
-              <label>Pulse ns<select data-key="pulse_width_ns">${PULSES.map(p => `<option value="${p}" ${p == active.pulse_width_ns ? 'selected':''}>${p}</option>`).join('')}</select></label>
+              ${!activeMachine || activeMachine.is_laser ? `<label>Power %<input data-key="power_percent" type="number" min="0" max="100" step="0.1" value="${active.power_percent}"></label>` : ''}
+              ${activeMachine && activeMachine.uses_frequency ? `<label>Frequency kHz<input data-key="frequency_khz" type="number" min="1" step="1" value="${active.frequency_khz}"></label>` : ''}
+              ${activeMachine && activeMachine.uses_pulse_width ? `<label>Pulse ns<select data-key="pulse_width_ns">${PULSES.map(p => `<option value="${p}" ${p == active.pulse_width_ns ? 'selected':''}>${p}</option>`).join('')}</select></label>` : ''}
+              ${activeMachine && activeMachine.supports_air_assist ? `<label><input data-key="air_assist" type="checkbox" ${active.air_assist ? 'checked' : ''}> Air assist (M8/M9)</label>` : ''}
               <label>Passes<input data-key="passes" type="number" min="1" step="1" value="${active.passes}"></label>
               ${active.operation === 'raster_engrave' ? `
                 <label>Hatch angle deg<input data-key="raster_angle_deg" type="number" step="1" value="${active.raster_angle_deg ?? 0}"></label>
@@ -1379,7 +1414,8 @@ HTML = """<!doctype html>
           recordHistory();
           const key = field.dataset.key;
           let value = field.value;
-          if (key === 'operation' || key === 'name' || key === 'color') value = String(value);
+          if (field.type === 'checkbox') value = field.checked;
+          else if (key === 'operation' || key === 'name' || key === 'color') value = String(value);
           else value = Number(value);
           active[key] = value;
           saveLayers();
@@ -1529,7 +1565,7 @@ HTML = """<!doctype html>
         const errs = [];
         if (layer.power_percent < 0 || layer.power_percent > 100) errs.push('power 0..100');
         if (layer.speed_mm_s <= 0) errs.push('speed > 0');
-        if (!PULSES.includes(Number(layer.pulse_width_ns))) errs.push('pulse not in JPT table');
+        if (activeMachine && activeMachine.uses_pulse_width && !PULSES.includes(Number(layer.pulse_width_ns))) errs.push('pulse not in JPT table');
         if (layer.operation === 'raster_engrave' && layer.output) {
           if (!(Number(layer.raster_pitch_mm) > 0)) errs.push('raster pitch must be > 0 mm');
           if (!isFinite(Number(layer.raster_angle_deg))) errs.push('raster angle invalid');
@@ -1835,7 +1871,7 @@ HTML = """<!doctype html>
       const h = Math.max(20, Math.max(...ys) - Math.min(...ys));
       const cx = (Math.max(...xs) + Math.min(...xs)) / 2;
       const cy = (Math.max(...ys) + Math.min(...ys)) / 2;
-      zoom = Math.min(40, FIELD_MM / Math.max(w, h) * 0.85);
+      zoom = Math.min(40, Math.min(FIELD_W_MM / w, FIELD_H_MM / h) * 0.85);
       viewX = cx; viewY = cy;
       render();
     }
@@ -2088,6 +2124,7 @@ HTML = """<!doctype html>
       const mx = document.getElementById('mirrorX').checked;
       const my = document.getElementById('mirrorY').checked;
       return {
+        machine_id: activeMachine ? activeMachine.machine_id : 'jpt-m7-200',
         objects: jobObjects.map(obj => ({
           name: obj.name,
           layer_id: obj.layer_id,
@@ -2123,6 +2160,18 @@ HTML = """<!doctype html>
 
     document.getElementById('plan').addEventListener('click', async () => {
       try { show(await postJson('/api/plan', buildJobPayload())); } catch {}
+    });
+    document.getElementById('exportGcode').addEventListener('click', async () => {
+      try {
+        const result = await postJson('/api/export/gcode', buildJobPayload());
+        const blob = new Blob([result.content], { type: 'text/plain;charset=utf-8' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = result.filename || 'openlaser-job.gcode';
+        link.click();
+        URL.revokeObjectURL(link.href);
+        show({ ...result, content: `${result.content.length} bytes downloaded` });
+      } catch {}
     });
     document.getElementById('frame').addEventListener('click', async () => {
       try { show(await postJson('/api/frame', buildJobPayload())); } catch {}
@@ -2202,6 +2251,11 @@ HTML = """<!doctype html>
 
     function setLaserChip(connected, mockActive) {
       const status = document.getElementById('status');
+      if (activeMachine && !activeMachine.direct_control) {
+        status.classList.add('ok');
+        status.querySelector('span:last-child').textContent = 'G-code output ready';
+        return;
+      }
       status.classList.toggle('ok', Boolean(connected) || Boolean(mockActive));
       status.querySelector('span:last-child').textContent = mockActive
         ? 'Mock mode — no hardware'
@@ -2235,7 +2289,7 @@ HTML = """<!doctype html>
         document.body.classList.add('serverOffline');
         banner.className = 'offline';
         banner.innerHTML = '<span class="pulse">&#9888;</span> Server connection lost — hardware controls disabled, retrying&hellip;' +
-          '<span class="sub">The OpenMopa server is not responding (its Terminal window may have been closed). ' +
+          '<span class="sub">The OpenLaser server is not responding (its Terminal window may have been closed). ' +
           'Restart it, e.g. <code>./.venv/bin/python -m mopa_luiz ui</code> — last contact <span id="connLastSeen">0s</span> ago.</span>';
       }
       const seen = document.getElementById('connLastSeen');
@@ -2256,9 +2310,52 @@ HTML = """<!doctype html>
     function applyFieldCalibration(nominalMm, correction) {
       if (Number.isFinite(nominalMm) && nominalMm > 0) fieldNominalMm = nominalMm;
       const factor = Number.isFinite(correction) && correction > 0 ? correction : 1;
-      FIELD_MM = fieldNominalMm * factor;
+      FIELD_W_MM = fieldNominalMm * factor;
+      FIELD_H_MM = fieldNominalMm * factor;
       const chip = document.getElementById('fieldChip');
-      if (chip) chip.textContent = `Field ${Number.isInteger(FIELD_MM) ? FIELD_MM : FIELD_MM.toFixed(2)} mm`;
+      if (chip) chip.textContent = `Field ${FIELD_W_MM.toFixed(1)} × ${FIELD_H_MM.toFixed(1)} mm`;
+    }
+    function applyMachine(machine) {
+      activeMachine = machine;
+      if (!machine) return;
+      if (machine.kind === 'fiber_galvo') {
+        const correction = Number(document.getElementById('scaleCorrection')?.value || 1);
+        applyFieldCalibration(fieldNominalMm, correction);
+      } else {
+        FIELD_W_MM = Number(machine.width_mm);
+        FIELD_H_MM = Number(machine.height_mm);
+        document.getElementById('fieldChip').textContent = `Bed ${FIELD_W_MM.toFixed(0)} × ${FIELD_H_MM.toFixed(0)} mm`;
+      }
+      document.getElementById('exportGcode').disabled = machine.output_format !== 'gcode';
+      document.getElementById('mark').style.display = machine.direct_control ? '' : 'none';
+      document.getElementById('frame').style.display = machine.direct_control ? '' : 'none';
+      document.getElementById('frameStart').style.display = machine.direct_control ? '' : 'none';
+      document.getElementById('frameStop').style.display = machine.direct_control ? '' : 'none';
+      document.getElementById('stopEngraving').style.display = machine.direct_control ? '' : 'none';
+      document.getElementById('armControl').style.display = machine.direct_control ? '' : 'none';
+      document.getElementById('fiberAdvanced').style.display = machine.kind === 'fiber_galvo' ? '' : 'none';
+      document.getElementById('powerMode').textContent = machine.direct_control
+        ? 'ARM required for emission' : 'Export only · no direct machine motion';
+      document.getElementById('status').querySelector('span:last-child').textContent = machine.direct_control
+        ? 'Checking JCZ/LMC USB' : 'File output · connect with a GRBL sender';
+      resetView();
+    }
+    async function loadMachines() {
+      const data = await getJson('/api/machines');
+      machines = data.machines || [];
+      const select = document.getElementById('machineSelect');
+      select.innerHTML = machines.map(machine => `<option value="${machine.machine_id}">${machine.name}</option>`).join('');
+      let saved = null;
+      try { saved = localStorage.getItem('openlaser.machine'); } catch {}
+      const machine = machines.find(item => item.machine_id === saved) || machines[0];
+      select.value = machine.machine_id;
+      applyMachine(machine);
+      select.addEventListener('change', () => {
+        const next = machines.find(item => item.machine_id === select.value);
+        try { localStorage.setItem('openlaser.machine', select.value); } catch {}
+        applyMachine(next);
+        render();
+      });
     }
     async function loadConfig() {
       const data = await getJson('/api/config');
@@ -2273,7 +2370,9 @@ HTML = """<!doctype html>
       // Field size x scale correction is the single source of truth for the
       // work area: the canvas must match what the mark path uses so the screen
       // and the hardware can never drift apart.
-      applyFieldCalibration(Number(data.FIELDSIZE), Number(data.SCALE_CORRECTION));
+      if (!activeMachine || activeMachine.kind === 'fiber_galvo') {
+        applyFieldCalibration(Number(data.FIELDSIZE), Number(data.SCALE_CORRECTION));
+      }
       const scInput = document.getElementById('scaleCorrection');
       if (scInput && Number.isFinite(Number(data.SCALE_CORRECTION))) {
         scInput.value = String(data.SCALE_CORRECTION);
@@ -2350,7 +2449,7 @@ HTML = """<!doctype html>
       });
     })();
 
-    loadSafety().then(loadLayers).then(loadConfig).then(loadWorkspace).then(refreshDetect).then(render).then(heartbeat);
+    loadSafety().then(loadMachines).then(loadLayers).then(loadConfig).then(loadWorkspace).then(refreshDetect).then(render).then(heartbeat);
   </script>
 </body>
 </html>
@@ -2397,6 +2496,9 @@ class UiHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/detect":
             self.send_json(HTTPStatus.OK, detect_report())
+            return
+        if path == "/api/machines":
+            self.send_json(HTTPStatus.OK, {"machines": machine_catalog()})
             return
         if path == "/api/config":
             summary = config_summary(load_markcfg(self.markcfg))
@@ -2552,9 +2654,60 @@ class UiHandler(BaseHTTPRequestHandler):
             emitting = emitting_jobs(jobs)
             framing_polylines = [poly for job in framing for poly in job.polylines]
             emitting_polylines = [poly for job in emitting for poly in job.polylines]
+            machine = machine_by_id(str(payload.get("machine_id") or "jpt-m7-200"))
+
+            if path == "/api/export/gcode":
+                program = compile_gcode(machine, jobs)
+                self.send_json(HTTPStatus.OK, {
+                    **program.to_dict(),
+                    "ok": True,
+                    "filename": f"openlaser-{machine.kind}.gcode",
+                    "machine": machine.to_dict(),
+                })
+                return
 
             if path == "/api/plan":
                 bbox = bounding_box(framing_polylines or emitting_polylines)
+                if machine.output_format == "gcode":
+                    program = None
+                    plan_errors: list[str] = []
+                    try:
+                        program = compile_gcode(machine, jobs)
+                    except ValueError as exc:
+                        plan_errors.append(str(exc))
+                    self.send_json(HTTPStatus.OK, {
+                        "mode": "gcode-preview",
+                        "emission_enabled": False,
+                        "machine": machine.to_dict(),
+                        "object_count": len(obj_list),
+                        "layer_count": len(layers),
+                        "emitting_layers": sum(1 for job in emitting if job.polylines),
+                        "framing_paths": len(framing_polylines),
+                        "emitting_paths": len(emitting_polylines),
+                        "bbox": bbox,
+                        "layers": [
+                            {
+                                "layer": job.layer.to_dict(),
+                                "path_count": len(job.polylines),
+                                "would_emit": job.layer.emits_when_marking() and bool(job.polylines),
+                            }
+                            for job in jobs
+                        ],
+                        "layer_errors": {},
+                        "safety": {
+                            "ok": not plan_errors,
+                            "emission_will_occur": False,
+                            "arm_ok": True,
+                            "errors": plan_errors,
+                            "warnings": ["Exported G-code must be framed and verified in your GRBL sender."],
+                        },
+                        "gcode": None if program is None else {
+                            "path_count": program.path_count,
+                            "point_count": program.point_count,
+                            "estimated_distance_mm": program.estimated_distance_mm,
+                        },
+                    })
+                    return
                 layer_errors = validate_layers(layers, cfg)
                 primary = next((job for job in emitting if job.polylines), None)
                 if primary is None:
@@ -2611,6 +2764,8 @@ class UiHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/frame":
+                if not machine.direct_control:
+                    raise ValueError("direct framing is not enabled for this machine; export G-code and use a GRBL sender")
                 FRAME_LOOP.stop()
                 clear_stop_request()
                 if framing_polylines:
@@ -2619,12 +2774,16 @@ class UiHandler(BaseHTTPRequestHandler):
                     self.send_json(HTTPStatus.OK, run_hardware_job("frame_box", cfg, params))
                 return
             if path == "/api/frame/start":
+                if not machine.direct_control:
+                    raise ValueError("continuous framing is only available on the JCZ/LMC profile")
                 self.send_json(HTTPStatus.OK, FRAME_LOOP.start(cfg, params, framing_polylines or None))
                 return
             if path == "/api/frame/stop":
                 self.send_json(HTTPStatus.OK, FRAME_LOOP.stop())
                 return
             if path == "/api/mark":
+                if not machine.direct_control:
+                    raise ValueError("direct machine control is not enabled for this profile; export G-code instead")
                 FRAME_LOOP.stop()
                 clear_stop_request()
                 repeat_count = max(1, min(999, int(live.get("repeat_count", 1) or 1)))
@@ -2763,7 +2922,7 @@ def first_burn_polylines(kind: str) -> list[list[list[float]]]:
 def serve(host: str, port: int, markcfg: Path) -> None:
     handler = type("ConfiguredUiHandler", (UiHandler,), {"markcfg": markcfg})
     server = ThreadingHTTPServer((host, port), handler)
-    print(f"OpenMopa UI: http://{host}:{port}  (safety: 0..100% power, ARM required)")
+    print(f"OpenLaser UI: http://{host}:{port}  (safety: 0..100% power, ARM required)")
     print("Default behavior is dry-run / red-light framing only. Mark Job needs ARM and confirmation.")
     try:
         server.serve_forever()

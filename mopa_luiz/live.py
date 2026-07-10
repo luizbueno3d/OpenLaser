@@ -311,7 +311,6 @@ def connect_controller(
     field_size = effective_field_size(cfg)
     usb_events: list[str] = []
     controller = GalvoController(
-        source="fiber",
         power=params.power,
         frequency=params.frequency_khz,
         pulse_width=nearest_pulse_width(params.pulse_width_ns),

@@ -1,4 +1,4 @@
--- OpenMopa launcher.
+-- OpenLaser launcher.
 -- 1. If the UI server is already running on 127.0.0.1:8765, just open the browser.
 -- 2. Otherwise, start it inside a Terminal window so the user can see logs and
 --    close the window to quit. Then open the browser ~2 seconds later.
@@ -11,7 +11,7 @@ set venvPython to projectPath & "/.venv/bin/python"
 try
     do shell script ("test -x " & quoted form of venvPython)
 on error
-    display dialog "OpenMopa.app must stay in the OpenMopa project folder (next to .venv). Could not find " & venvPython buttons {"OK"} default button "OK" with icon stop
+    display dialog "OpenLaser.app must stay in the OpenLaser project folder (next to .venv). Could not find " & venvPython buttons {"OK"} default button "OK" with icon stop
     return
 end try
 set portNumber to 8765
