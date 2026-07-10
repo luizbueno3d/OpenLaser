@@ -67,7 +67,8 @@ printf '\n\033[1;32mDone! OpenLaser is installed.\033[0m\n'
 cat <<'EOF'
 
   * Double-click OpenLaser.app (in this folder) to start OpenLaser.
-  * Tip: drag OpenLaser.app to your Dock so it is always one click away.
+  * Finder will select OpenLaser.app for you next.
+  * Drag that app into your Dock for a permanent one-click launcher.
   * Keep OpenLaser.app inside this folder - it belongs here.
   * If you move this folder somewhere else later, just run this
     installer again.

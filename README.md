@@ -79,13 +79,27 @@ The installer creates `OpenLaser.app` inside the same folder.
 
 1. Double-click **OpenLaser.app**.
 2. A Terminal window opens. Leave it open while you use OpenLaser.
-3. Your web browser opens to `http://127.0.0.1:8765`.
+3. Your default web browser opens automatically to `http://127.0.0.1:8765`.
+
+OpenLaser asks macOS to use your default browser. That may be Safari, Chrome,
+Firefox, or whichever browser you selected in System Settings. You do not need
+to copy the address manually.
 
 This address is local to your computer. The interface is displayed in a browser,
 but the job is not uploaded to a website.
 
-You may drag `OpenLaser.app` to your Dock for easier access. Keep the actual app
-file inside the OpenLaser project folder.
+### Add OpenLaser to the Dock — one-click quick launch
+
+The Dock is the row of app icons normally shown at the bottom of your Mac.
+
+1. Open the OpenLaser project folder in Finder.
+2. Find `OpenLaser.app`.
+3. Drag `OpenLaser.app` onto the app area of the Dock.
+4. Release it where you want the icon to stay.
+5. Next time, click that Dock icon once to start OpenLaser.
+
+The Dock icon is a shortcut. Keep the real `OpenLaser.app` inside the OpenLaser
+project folder so it can find `.venv` and the rest of the program.
 
 ### 5. Stop OpenLaser
 
@@ -106,7 +120,8 @@ python -m pip install -e ".[hardware]"
 openlaser ui
 ```
 
-Then open `http://127.0.0.1:8765` if the browser does not open automatically.
+OpenLaser automatically opens your default browser. On a server or other
+headless computer, use `openlaser ui --no-browser` instead.
 
 Next time, start it with:
 

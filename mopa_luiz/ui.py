@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import os
+import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2919,11 +2920,39 @@ def first_burn_polylines(kind: str) -> list[list[list[float]]]:
     return [[[0.0, 0.0], [0.05, 0.0]]]
 
 
-def serve(host: str, port: int, markcfg: Path) -> None:
+def browser_url(host: str, port: int) -> str:
+    """Return a browser-safe local URL for the server's bind address."""
+    if host in {"0.0.0.0", ""}:
+        browser_host = "127.0.0.1"
+    elif host == "::":
+        browser_host = "[::1]"
+    elif ":" in host and not host.startswith("["):
+        browser_host = f"[{host}]"
+    else:
+        browser_host = host
+    return f"http://{browser_host}:{port}"
+
+
+def open_default_browser(url: str) -> bool:
+    """Open a new tab in the user's configured default browser without failing startup."""
+    try:
+        return bool(webbrowser.open(url, new=2, autoraise=True))
+    except Exception as exc:
+        print(f"Could not open the default browser automatically: {exc}")
+        return False
+
+
+def serve(host: str, port: int, markcfg: Path, *, open_browser: bool = True) -> None:
     handler = type("ConfiguredUiHandler", (UiHandler,), {"markcfg": markcfg})
     server = ThreadingHTTPServer((host, port), handler)
-    print(f"OpenLaser UI: http://{host}:{port}  (safety: 0..100% power, ARM required)")
+    url = browser_url(host, port)
+    print(f"OpenLaser UI: {url}  (safety: 0..100% power, ARM required)")
     print("Default behavior is dry-run / red-light framing only. Mark Job needs ARM and confirmation.")
+    if open_browser:
+        if open_default_browser(url):
+            print("Opened OpenLaser in your default browser.")
+        else:
+            print(f"Open this address manually: {url}")
     try:
         server.serve_forever()
     finally:
