@@ -2543,8 +2543,9 @@ class UiHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_payload()
             if path == "/api/stop":
-                frame_result = FRAME_LOOP.stop()
+                # Emission first: a running mark matters more than the red light.
                 hardware_result = stop_active_hardware_jobs()
+                frame_result = FRAME_LOOP.stop()
                 self.send_json(HTTPStatus.OK, {
                     "ok": True,
                     "operation": "emergency_stop",

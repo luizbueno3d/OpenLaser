@@ -128,6 +128,14 @@ class JobParams:
     mark_speed: float
 
 
+def stop_controller(controller: GalvoController) -> None:
+    """Release any pending board waits, then abort and disconnect."""
+    stop_event = getattr(controller, "_openlaser_stop", None)
+    if stop_event is not None:
+        stop_event.set()
+    controller.shutdown()
+
+
 def _graceful_hardware_stop() -> None:
     """Abort the board cleanly (stop execution, reset list, close MO). Never raises."""
     controller = _ACTIVE_CONTROLLER
@@ -138,7 +146,7 @@ def _graceful_hardware_stop() -> None:
     watchdog.daemon = True
     watchdog.start()
     try:
-        controller.shutdown()
+        stop_controller(controller)
     except Exception:
         pass
     finally:
@@ -294,6 +302,29 @@ def geometry_errors(polylines: list[list[list[float]]], field_size_mm: float) ->
     return errors
 
 
+FRAME_LIGHT_SPEED_MM_S = 3000.0
+# One pass of a small shape at light speed lasts a few milliseconds, too short
+# to see, so Frame Once retraces it for roughly this long.
+FRAME_ONCE_SECONDS = 2.0
+
+
+def frame_once_repeats(polylines: list[list[list[float]]], point_count: int) -> int:
+    length_mm = 0.0
+    previous: tuple[float, float] | None = None
+    for polyline in polylines:
+        for raw in polyline:
+            point = (float(raw[0]), float(raw[1]))
+            if previous is not None:
+                length_mm += math.dist(previous, point)
+            previous = point
+    if previous is not None and polylines and polylines[0]:
+        length_mm += math.dist(previous, (float(polylines[0][0][0]), float(polylines[0][0][1])))
+    pass_seconds = max(length_mm / FRAME_LIGHT_SPEED_MM_S, 1e-3)
+    by_time = math.ceil(FRAME_ONCE_SECONDS / pass_seconds)
+    by_size = max(1, MAX_JOB_POINTS // max(1, point_count))
+    return max(1, min(by_time, by_size, 500))
+
+
 def sanitize_polylines(polylines: list[list[list[float]]], field_size_mm: float) -> list[list[tuple[int, int]]]:
     errors = geometry_errors(polylines, field_size_mm)
     if errors:
@@ -359,7 +390,7 @@ def connect_controller(
         pulse_width=nearest_pulse_width(params.pulse_width_ns, pulse_width_table(cfg)),
         mark_speed=params.mark_speed,
         travel_speed=3000.0,
-        light_speed=3000.0,
+        light_speed=FRAME_LIGHT_SPEED_MM_S,
         galvos_per_mm=0xFFFF / field_size,
         mock=mock_mode(),
         usb_log=usb_events.append,
@@ -404,12 +435,23 @@ def connect_controller(
 
 
 def apply_wait_timeouts(controller: GalvoController, timeout_s: float = 3.0) -> None:
+    # The spooler thread waits here, holding the list-build lock, before it
+    # pushes its next list packet. On stop it must drop that packet rather than
+    # send it: writing into the board's full list buffer times out, and the
+    # driver then resets the USB device on every following command, so a
+    # stop took 3-6 s and risked wedging the board. The driver's spooler exits
+    # cleanly on ConnectionAbortedError.
+    controller._openlaser_stop = threading.Event()  # type: ignore[attr-defined]
+
     def wait_until(predicate, label: str) -> None:
         deadline = time.monotonic() + timeout_s
         while predicate():
             if time.monotonic() > deadline:
                 return
-            time.sleep(0.01)
+            if controller._openlaser_stop.wait(0.01):  # type: ignore[attr-defined]
+                if threading.current_thread() is controller._spooler_thread:
+                    raise ConnectionAbortedError("stop requested")
+                return
             if not controller._sending:
                 return
 
@@ -510,6 +552,8 @@ class FrameLoop:
             controller = connect_controller(cfg, params)
 
             def loop_job(c: GalvoController) -> bool:
+                if c._openlaser_stop.is_set():  # type: ignore[attr-defined]
+                    return True
                 c.lighting_configuration()
                 for path in job_paths:
                     c.dark(*path[0])
@@ -532,7 +576,7 @@ class FrameLoop:
         self._controller = None
         self._points = []
         if controller is not None:
-            controller.shutdown()
+            stop_controller(controller)
         return {
             "ok": True,
             "operation": "frame_loop_stop",
@@ -613,14 +657,16 @@ def frame_polylines(cfg: MarkConfig, params: JobParams, polylines: list[list[lis
     ).raise_if_blocked()
     field_size = effective_field_size(cfg)
     job_paths = sanitize_polylines(polylines, field_size)
+    repeats = frame_once_repeats(polylines, sum(len(path) for path in job_paths))
     controller = connect_controller(cfg, params)
     try:
         def job(c: GalvoController) -> bool:
             with c.lighting():
-                for path in job_paths:
-                    c.dark(*path[0])
-                    for point in path[1:]:
-                        c.light(*point)
+                for _ in range(repeats):
+                    for path in job_paths:
+                        c.dark(*path[0])
+                        for point in path[1:]:
+                            c.light(*point)
             return True
 
         controller.submit(job)
@@ -630,6 +676,7 @@ def frame_polylines(cfg: MarkConfig, params: JobParams, polylines: list[list[lis
             "operation": "frame_geometry",
             "emission_enabled": False,
             "mock": mock_mode(),
+            "repeats": repeats,
             "paths": len(job_paths),
             "points": sum(len(path) for path in job_paths),
         }

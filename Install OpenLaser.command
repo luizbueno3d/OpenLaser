@@ -60,6 +60,11 @@ rm -rf OpenLaser.app
 osacompile -o OpenLaser.app scripts/launcher.applescript
 if [ -f assets/icons/openmopa.icns ]; then
   cp assets/icons/openmopa.icns OpenLaser.app/Contents/Resources/applet.icns
+  # Recent macOS osacompile also writes an asset-catalog icon (Assets.car +
+  # CFBundleIconName) that takes precedence over applet.icns.
+  rm -f OpenLaser.app/Contents/Resources/Assets.car
+  /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" OpenLaser.app/Contents/Info.plist >/dev/null 2>&1 || true
+  codesign --force --sign - OpenLaser.app >/dev/null 2>&1 || true
   touch OpenLaser.app
 fi
 
