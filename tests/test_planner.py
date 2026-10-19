@@ -185,6 +185,51 @@ class PlanAndMarkTests(unittest.TestCase):
         passes = result["payload"]["passes"]
         self.assertTrue(any(r.get("operation") == "raster_skip" for r in passes))
 
+    def test_frame_only_objects_are_never_marked(self):
+        objects = [{"layer_id": "frame-only", "polylines": [[(0, 0), (5, 0), (5, 5), (0, 0)]]}]
+        with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
+            result = call_post(self.handler_cls, "/api/mark", self._payload(objects=objects))
+        self.assertEqual(result["status"].value, 400)
+        self.assertIn("nothing to mark", result["payload"]["error"])
+        patched.assert_not_called()
+
+    def test_output_off_layer_is_never_marked(self):
+        layers = default_layers()
+        for layer in layers:
+            if layer.layer_id == "vector-engrave":
+                layer.output = False
+        with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
+            result = call_post(self.handler_cls, "/api/mark", self._payload(layers=layers))
+        self.assertEqual(result["status"].value, 400)
+        patched.assert_not_called()
+
+    def test_plan_warns_when_only_frame_only_geometry(self):
+        objects = [{"layer_id": "frame-only", "polylines": [[(0, 0), (5, 0)]]}]
+        result = call_post(self.handler_cls, "/api/plan", self._payload(objects=objects))
+        self.assertEqual(result["status"], 200)
+        self.assertTrue(any("will not burn" in w for w in result["payload"]["safety"]["warnings"]))
+
+    def test_out_of_field_geometry_fails_plan_and_mark(self):
+        objects = [{"layer_id": "vector-engrave", "polylines": [[(0, 0), (150, 0)]]}]
+        plan = call_post(self.handler_cls, "/api/plan", self._payload(objects=objects))
+        self.assertFalse(plan["payload"]["safety"]["ok"])
+        self.assertTrue(any("outside" in e for e in plan["payload"]["safety"]["errors"]))
+        with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
+            mark = call_post(self.handler_cls, "/api/mark", self._payload(objects=objects))
+        self.assertEqual(mark["status"].value, 400)
+        patched.assert_not_called()
+
+    def test_bad_later_layer_blocks_the_whole_job_before_any_burn(self):
+        objects = [
+            {"layer_id": "vector-engrave", "polylines": [[(0, 0), (5, 0)]]},
+            {"layer_id": "vector-cut", "polylines": [[(0, 0), (150, 0)]]},
+        ]
+        with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
+            result = call_post(self.handler_cls, "/api/mark", self._payload(objects=objects))
+        self.assertEqual(result["status"].value, 400)
+        self.assertTrue(result["payload"]["geometry_errors"])
+        patched.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

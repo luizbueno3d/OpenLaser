@@ -38,6 +38,8 @@ from .live import (
     load_scale_correction,
     save_scale_correction,
     mock_mode,
+    effective_field_size,
+    geometry_errors,
 )
 from .machines import machine_by_id, machine_catalog
 from .profile import inspect as inspect_profile_data
@@ -2736,6 +2738,19 @@ class UiHandler(BaseHTTPRequestHandler):
                         operation=layer.operation,
                         paths_count=sum(len(job.polylines) for job in emitting),
                     )
+                safety_report = primary_safety.to_dict()
+                geometry_problems = emission_geometry_errors(
+                    emission_steps(emitting), framing_polylines, effective_field_size(cfg)
+                )
+                if geometry_problems:
+                    safety_report["errors"] = list(safety_report["errors"]) + geometry_problems
+                    safety_report["ok"] = False
+                    safety_report["emission_will_occur"] = False
+                if not emitting and framing_polylines:
+                    safety_report["warnings"] = list(safety_report["warnings"]) + [
+                        "No object is on an output layer, so Mark Job will not burn anything. "
+                        "Frame Only and disabled layers are only traced with the red light."
+                    ]
                 self.send_json(HTTPStatus.OK, {
                     "mode": "dry-run",
                     "emission_enabled": False,
@@ -2754,7 +2769,7 @@ class UiHandler(BaseHTTPRequestHandler):
                         for job in jobs
                     ],
                     "layer_errors": layer_errors,
-                    "safety": primary_safety.to_dict(),
+                    "safety": safety_report,
                     "frame_settings": {
                         "power_percent": params.power,
                         "frequency_khz": params.frequency_khz,
@@ -2795,16 +2810,31 @@ class UiHandler(BaseHTTPRequestHandler):
                         "layer_errors": layer_errors,
                     })
                     return
+                steps = emission_steps(emitting)
+                if not steps:
+                    # Frame Only / disabled / output-off layers must never burn.
+                    self.send_json(HTTPStatus.BAD_REQUEST, {
+                        "error": "nothing to mark: no object is on a layer with Output on and a "
+                                 "marking mode. Frame Only and disabled layers are never burned.",
+                    })
+                    return
+                # Validate the whole job before the first layer burns, so a bad
+                # later layer cannot leave a half-marked part.
+                geometry_problems = emission_geometry_errors(steps, [], effective_field_size(cfg))
+                if geometry_problems:
+                    self.send_json(HTTPStatus.BAD_REQUEST, {
+                        "error": "job geometry cannot be marked as planned",
+                        "geometry_errors": geometry_problems,
+                    })
+                    return
                 results = []
                 for repeat_index in range(repeat_count):
                     if stop_requested():
                         break
-                    for job in emitting:
+                    for step in steps:
                         if stop_requested():
                             break
-                        if not job.polylines:
-                            continue
-                        layer = job.layer
+                        layer = step["job"].layer
                         layer_params = JobParams(
                             text="",
                             power=layer.power_percent,
@@ -2813,71 +2843,33 @@ class UiHandler(BaseHTTPRequestHandler):
                             size_mm=10.0,
                             mark_speed=layer.speed_mm_s,
                         )
-                        if layer.operation == "raster_engrave":
-                            raster_result = hatch_polylines(
-                                job.polylines,
-                                angle_deg=layer.raster_angle_deg,
-                                pitch_mm=layer.raster_pitch_mm,
-                                passes=max(1, layer.passes),
-                                angle_step_deg=layer.raster_angle_step_deg,
-                            )
-                            if not raster_result.segments:
-                                results.append({
-                                    "ok": True,
-                                    "operation": "raster_skip",
-                                    "layer": layer.layer_id,
-                                    "repeat": repeat_index + 1,
-                                    "reason": "no closed regions for raster fill",
-                                    "skipped_open": raster_result.skipped_open_count,
-                                })
-                                continue
+                        raster_result = step["raster"]
+                        if raster_result is not None and not raster_result.segments:
+                            results.append({
+                                "ok": True,
+                                "operation": "raster_skip",
+                                "layer": layer.layer_id,
+                                "repeat": repeat_index + 1,
+                                "reason": "no closed regions for raster fill",
+                                "skipped_open": raster_result.skipped_open_count,
+                            })
+                            continue
+                        for _ in range(step["passes"]):
+                            if stop_requested():
+                                break
                             results.append(run_hardware_job(
                                 "mark_polylines",
                                 cfg,
                                 layer_params,
-                                raster_result.segments,
+                                step["polylines"],
                                 arm=bool(live.get("arm")),
                                 confirm=str(live.get("confirm", "")),
                                 operation=layer.operation,
                                 timeout_s=600.0,
                             ))
-                            results[-1].update({
-                                "repeat": repeat_index + 1,
-                                "raster": raster_result.to_dict(),
-                            })
-                        else:
-                            for _ in range(max(1, layer.passes)):
-                                if stop_requested():
-                                    break
-                                results.append(run_hardware_job(
-                                    "mark_polylines",
-                                    cfg,
-                                    layer_params,
-                                    job.polylines,
-                                    arm=bool(live.get("arm")),
-                                    confirm=str(live.get("confirm", "")),
-                                    operation=layer.operation,
-                                    timeout_s=600.0,
-                                ))
-                                results[-1].update({"repeat": repeat_index + 1})
-                if not results:
-                    # No layered emitting jobs — fall back to the live-panel single-pass.
-                    if not emitting_polylines and not framing_polylines:
-                        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "no markable geometry in job"})
-                        return
-                    for repeat_index in range(repeat_count):
-                        if stop_requested():
-                            break
-                        results.append(run_hardware_job(
-                            "mark_polylines",
-                            cfg,
-                            params,
-                            emitting_polylines or framing_polylines,
-                            arm=bool(live.get("arm")),
-                            confirm=str(live.get("confirm", "")),
-                            timeout_s=600.0,
-                        ))
-                        results[-1].update({"repeat": repeat_index + 1})
+                            results[-1].update({"repeat": repeat_index + 1})
+                            if raster_result is not None:
+                                results[-1]["raster"] = raster_result.to_dict()
                 self.send_json(HTTPStatus.OK, {
                     "ok": True,
                     "operation": "mark",
@@ -2902,6 +2894,43 @@ def job_params_from_payload(payload: dict) -> JobParams:
         size_mm=float(payload.get("size_mm", 10)),
         mark_speed=float(payload.get("mark_speed", 1000)),
     )
+
+
+def emission_steps(emitting: list) -> list[dict]:
+    """What each emitting layer will actually send to the galvo, in order.
+
+    Raster layers are expanded to their hatch segments here so planning and
+    marking validate exactly the geometry that will be burned.
+    """
+    steps = []
+    for job in emitting:
+        if not job.polylines:
+            continue
+        layer = job.layer
+        if layer.operation == "raster_engrave":
+            raster_result = hatch_polylines(
+                job.polylines,
+                angle_deg=layer.raster_angle_deg,
+                pitch_mm=layer.raster_pitch_mm,
+                passes=max(1, layer.passes),
+                angle_step_deg=layer.raster_angle_step_deg,
+            )
+            steps.append({"job": job, "polylines": raster_result.segments, "raster": raster_result, "passes": 1})
+        else:
+            steps.append({"job": job, "polylines": job.polylines, "raster": None, "passes": max(1, layer.passes)})
+    return steps
+
+
+def emission_geometry_errors(steps: list[dict], framing_polylines: list, field_size_mm: float) -> list[str]:
+    errors = [
+        f"Layer {step['job'].layer.name}: {error}"
+        for step in steps
+        if step["polylines"]
+        for error in geometry_errors(step["polylines"], field_size_mm)
+    ]
+    if not errors and framing_polylines:
+        errors = [f"Framing: {error}" for error in geometry_errors(framing_polylines, field_size_mm)]
+    return errors
 
 
 def first_burn_params(kind: str) -> dict:

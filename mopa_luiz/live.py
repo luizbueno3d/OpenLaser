@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 import multiprocessing as mp
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ from .cli import (
     MarkConfig,
     build_test_box_plan,
     nearest_pulse_width,
+    pulse_width_table,
 )
 from .safety import evaluate_emission
 
@@ -241,25 +243,66 @@ def mm_to_galvo(x_mm: float, y_mm: float, field_size_mm: float) -> tuple[int, in
     return max(0, min(0xFFFF, x)), max(0, min(0xFFFF, y))
 
 
-def sanitize_polylines(polylines: list[list[list[float]]], field_size_mm: float) -> list[list[tuple[int, int]]]:
-    limit = field_size_mm / 2.0
-    clean: list[list[tuple[int, int]]] = []
+MAX_JOB_PATHS = 3000
+MAX_PATH_POINTS = 2000
+MAX_JOB_POINTS = 20000
+# Float noise from transforms must not reject a shape drawn exactly on the edge.
+FIELD_EDGE_TOLERANCE_MM = 1e-6
+
+
+def geometry_errors(polylines: list[list[list[float]]], field_size_mm: float) -> list[str]:
+    """Reasons this geometry cannot be sent to the galvo as-is; empty when OK.
+
+    The galvo must burn exactly what was planned, so out-of-field points and
+    oversized jobs are refused rather than clamped or truncated.
+    """
+    errors: list[str] = []
+    limit = field_size_mm / 2.0 + FIELD_EDGE_TOLERANCE_MM
+    if len(polylines) > MAX_JOB_PATHS:
+        errors.append(
+            f"job has {len(polylines)} paths; the limit per layer pass is {MAX_JOB_PATHS}. "
+            "Split the job, or use a larger raster pitch."
+        )
     total_points = 0
-    for polyline in polylines[:3000]:
-        points = []
-        for raw in polyline[:2000]:
+    outside = 0
+    first_outside: tuple[float, float] | None = None
+    longest = 0
+    for polyline in polylines:
+        longest = max(longest, len(polyline))
+        for raw in polyline:
             if len(raw) < 2:
                 continue
-            x = max(-limit, min(limit, float(raw[0])))
-            y = max(-limit, min(limit, float(raw[1])))
-            points.append(mm_to_galvo(x, y, field_size_mm))
             total_points += 1
-            if total_points > 20000:
-                break
+            x, y = float(raw[0]), float(raw[1])
+            if not (math.isfinite(x) and math.isfinite(y)) or abs(x) > limit or abs(y) > limit:
+                outside += 1
+                if first_outside is None:
+                    first_outside = (x, y)
+    if longest > MAX_PATH_POINTS:
+        errors.append(f"a path has {longest} points; the limit is {MAX_PATH_POINTS} per path.")
+    if total_points > MAX_JOB_POINTS:
+        errors.append(
+            f"job has {total_points} points; the limit per layer pass is {MAX_JOB_POINTS}. "
+            "Split the job, or simplify the artwork."
+        )
+    if first_outside is not None:
+        errors.append(
+            f"{outside} point(s) are outside the {field_size_mm:.2f} mm galvo field "
+            f"(first at {first_outside[0]:.2f}, {first_outside[1]:.2f} mm). "
+            "Move or scale the artwork inside the field."
+        )
+    return errors
+
+
+def sanitize_polylines(polylines: list[list[list[float]]], field_size_mm: float) -> list[list[tuple[int, int]]]:
+    errors = geometry_errors(polylines, field_size_mm)
+    if errors:
+        raise ValueError(" ".join(errors))
+    clean: list[list[tuple[int, int]]] = []
+    for polyline in polylines:
+        points = [mm_to_galvo(float(raw[0]), float(raw[1]), field_size_mm) for raw in polyline if len(raw) >= 2]
         if len(points) >= 2:
             clean.append(points)
-        if total_points > 20000:
-            break
     if not clean:
         raise ValueError("no markable geometry in job")
     return clean
@@ -313,7 +356,7 @@ def connect_controller(
     controller = GalvoController(
         power=params.power,
         frequency=params.frequency_khz,
-        pulse_width=nearest_pulse_width(params.pulse_width_ns),
+        pulse_width=nearest_pulse_width(params.pulse_width_ns, pulse_width_table(cfg)),
         mark_speed=params.mark_speed,
         travel_speed=3000.0,
         light_speed=3000.0,
@@ -635,7 +678,7 @@ def mark_polylines(
             "mock": mock_mode(),
             "power_percent": params.power,
             "frequency_khz": params.frequency_khz,
-            "effective_pulse_width_ns": nearest_pulse_width(params.pulse_width_ns),
+            "effective_pulse_width_ns": nearest_pulse_width(params.pulse_width_ns, pulse_width_table(cfg)),
             "paths": len(job_paths),
             "points": sum(len(path) for path in job_paths),
         }
