@@ -7,11 +7,14 @@ import multiprocessing as mp
 import os
 from pathlib import Path
 import signal
+import sys
 import threading
 import time
 from typing import Any
 
 from galvo.controller import GalvoController
+
+from .usb_backend import ensure_libusb_backend
 
 from .cli import (
     MarkConfig,
@@ -382,6 +385,8 @@ def text_segments(text: str, size_mm: float) -> list[tuple[tuple[float, float], 
 def connect_controller(
     cfg: MarkConfig, params: JobParams, connect_timeout_s: float = CONNECT_TIMEOUT_S
 ) -> GalvoController:
+    # Hardware jobs run in fresh spawned processes, so load libusb here too.
+    ensure_libusb_backend()
     field_size = effective_field_size(cfg)
     usb_events: list[str] = []
     controller = GalvoController(
@@ -419,10 +424,23 @@ def connect_controller(
             pass
         cause = connect_errors[0] if connect_errors else None
         detail = "; ".join(usb_events[-4:]) or (str(cause) if cause else "connect timed out")
+        log_text = " ".join(usb_events + [str(cause or "")]).lower()
         if any("claim: Success" in event for event in usb_events):
             hint = (
                 "The board connects but is not responding (wedged controller). "
                 "Power-cycle the laser (full power off, wait 15s, power on), then retry."
+            )
+        elif sys.platform.startswith("win") and any(
+            marker in log_text for marker in ("not supported", "not implemented", "entity not found", "errno 40")
+        ):
+            hint = (
+                "Windows is using the EZCAD (BJJCZ) driver for the laser. Install the WinUSB "
+                "driver for USBLMCV4 with Zadig (see the README), then retry."
+            )
+        elif any(marker in log_text for marker in ("access denied", "errno 13", "permission")):
+            hint = (
+                "This user is not allowed to open the laser's USB device. On Linux, install "
+                "scripts/99-openlaser.rules (see the README), then unplug and replug the laser."
             )
         else:
             hint = "Check power, USB cable, and the Detect panel, then retry."

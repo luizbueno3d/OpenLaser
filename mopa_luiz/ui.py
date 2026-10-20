@@ -8,6 +8,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+import urllib.request
 
 from .cli import build_test_box_plan, config_summary, detect_report, load_markcfg, pyusb_probe
 from .geometry import bounding_box, join_lines
@@ -2972,10 +2973,31 @@ def open_default_browser(url: str) -> bool:
         return False
 
 
+def openlaser_running(url: str) -> bool:
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/api/health", timeout=2) as response:
+            return bool(json.loads(response.read()).get("ok"))
+    except (OSError, ValueError):
+        return False
+
+
 def serve(host: str, port: int, markcfg: Path, *, open_browser: bool = True) -> None:
     handler = type("ConfiguredUiHandler", (UiHandler,), {"markcfg": markcfg})
-    server = ThreadingHTTPServer((host, port), handler)
     url = browser_url(host, port)
+    # Launchers simply start OpenLaser, so a second launch must reuse the
+    # running server. Check before binding: on Windows SO_REUSEADDR lets a
+    # second server bind the same port without any error.
+    if openlaser_running(url):
+        print(f"OpenLaser is already running: {url}")
+        if open_browser:
+            open_default_browser(url)
+        return
+    try:
+        server = ThreadingHTTPServer((host, port), handler)
+    except OSError as exc:
+        raise OSError(
+            f"port {port} is used by another program. Close it, or start OpenLaser with --port <other number>."
+        ) from exc
     print(f"OpenLaser UI: {url}  (safety: 0..100% power, ARM required)")
     print("Default behavior is dry-run / red-light framing only. Mark Job needs ARM and confirmation.")
     if open_browser:

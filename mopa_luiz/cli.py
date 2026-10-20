@@ -135,11 +135,17 @@ def pyusb_probe() -> dict[str, Any]:
         }
     import usb.core  # type: ignore[import-not-found]
 
+    from .usb_backend import ensure_libusb_backend
+
+    libusb = ensure_libusb_backend()
+    if not libusb["available"]:
+        return {"available": False, "devices": [], "libusb": libusb, "note": libusb["note"]}
     devices = list(
         usb.core.find(idVendor=JCZ_VENDOR_ID, idProduct=JCZ_PRODUCT_ID, find_all=True)
     )
     return {
         "available": True,
+        "libusb": libusb,
         "devices": [
             {
                 "idVendor": f"0x{dev.idVendor:04x}",
@@ -152,36 +158,62 @@ def pyusb_probe() -> dict[str, Any]:
     }
 
 
-def detect_report() -> dict[str, Any]:
-    libusb_path = Path("/opt/homebrew/lib/libusb-1.0.dylib")
-    pyusb = pyusb_probe()
-    profiler_code, profiler_out = run_command(["system_profiler", "SPUSBDataType"])
-    ioreg_code, ioreg_out = run_command(["ioreg", "-p", "IOUSB", "-l", "-w", "0"])
-
+def os_usb_listing() -> tuple[str, int, list[str]]:
+    """Ask the operating system's own USB tool for the laser, independent of libusb."""
+    if sys.platform == "darwin":
+        tool = ["ioreg", "-p", "IOUSB", "-l", "-w", "0"]
+    elif sys.platform.startswith("win"):
+        tool = ["pnputil", "/enum-devices", "/connected"]
+    else:
+        tool = ["lsusb"]
+    code, out = run_command(tool)
     interesting_terms = ("9588", "9899", "JCZ", "BJJCZ", "LMCV")
-    profiler_hits = [
+    hits = [
         line.strip()
-        for line in profiler_out.splitlines()
+        for line in out.splitlines()
         if any(term.lower() in line.lower() for term in interesting_terms)
     ]
-    ioreg_hits = [
-        line.strip()
-        for line in ioreg_out.splitlines()
-        if any(term.lower() in line.lower() for term in interesting_terms)
-    ]
+    return tool[0], code, hits
 
-    connected = bool(pyusb["devices"] or profiler_hits or ioreg_hits)
+
+def detect_hint(seen_by_os: bool, usable: bool, libusb_ok: bool) -> str | None:
+    if usable:
+        return None
+    if not libusb_ok:
+        return "The libusb library could not be loaded. Run the OpenLaser installer again."
+    if not seen_by_os:
+        return "No JCZ/LMC laser is visible. Check machine power and the USB cable, then run detect again."
+    if sys.platform.startswith("win"):
+        return (
+            "Windows sees the laser, but it is using the EZCAD (BJJCZ) driver, which OpenLaser "
+            "cannot use. Install the WinUSB driver for USBLMCV4 with Zadig; see the README."
+        )
+    if sys.platform.startswith("linux"):
+        return (
+            "Linux sees the laser, but this user may not have permission to open it. Install "
+            "the udev rule from scripts/99-openlaser.rules; see the README."
+        )
+    return "The laser is visible to the system but not to libusb. Reconnect USB and try again."
+
+
+def detect_report() -> dict[str, Any]:
+    pyusb = pyusb_probe()
+    tool, tool_code, os_hits = os_usb_listing()
+    usable = bool(pyusb["devices"])
+    seen_by_os = bool(os_hits)
+    libusb = pyusb.get("libusb") or {}
     return {
         "platform": platform.platform(),
         "python": sys.version.split()[0],
         "expected_jcz_lmc_usb_id": "0x9588:0x9899",
-        "connected": connected,
-        "homebrew_libusb_present": libusb_path.exists(),
+        "connected": usable,
+        "seen_by_operating_system": seen_by_os,
+        "libusb": libusb,
         "pyusb": pyusb,
-        "system_profiler_exit": profiler_code,
-        "system_profiler_hits": profiler_hits,
-        "ioreg_exit": ioreg_code,
-        "ioreg_hits": ioreg_hits,
+        "os_usb_tool": tool,
+        "os_usb_tool_exit": tool_code,
+        "os_usb_hits": os_hits,
+        "hint": detect_hint(seen_by_os, usable, bool(libusb.get("available"))),
         "safe_status": "no laser commands sent",
     }
 
@@ -190,10 +222,7 @@ def detect(_: argparse.Namespace) -> int:
     report = detect_report()
     print(json.dumps(report, indent=2))
     if not report["connected"]:
-        print(
-            "\nNo JCZ/LMC USB device is visible to macOS yet. "
-            "Reconnect power/USB or try another cable/adapter, then run detect again."
-        )
+        print(f"\n{report['hint']}")
         return 2
     return 0
 

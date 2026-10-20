@@ -49,11 +49,11 @@ if [ ! -x ".venv/bin/python" ]; then
   "$PYTHON" -m venv .venv
 fi
 ./.venv/bin/python -m pip install --quiet --upgrade pip
-./.venv/bin/python -m pip install --quiet -e ".[hardware]" \
+./.venv/bin/python -m pip install --quiet -e . \
   || fail "The installation step failed." \
 "Check your internet connection and run this installer again.
 If it keeps failing, please open an issue at
-https://github.com/luizbueno3d/OpenMopa/issues with a screenshot."
+https://github.com/luizbueno3d/OpenLaser/issues with a screenshot."
 
 step "Step 3 of 3: Building the OpenLaser app"
 rm -rf OpenLaser.app

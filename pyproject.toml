@@ -13,16 +13,27 @@ authors = [{ name = "Luiz Bueno" }]
 keywords = ["mopa", "co2", "diode", "plotter", "grbl", "galvo", "laser", "jcz", "lmc"]
 classifiers = [
   "Development Status :: 3 - Alpha",
-  "Environment :: MacOS X",
   "Intended Audience :: Manufacturing",
   "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Topic :: Scientific/Engineering",
 ]
-dependencies = ["galvoplotter"]
+# libusb-package ships the native libusb library that pyusb needs, so the
+# laser is found on a fresh Mac, Windows or Linux machine. It only publishes
+# wheels for these platforms; elsewhere (Windows on ARM, 32-bit Raspberry Pi)
+# requiring it would break the install, and the system libusb is used instead.
+dependencies = [
+  "galvoplotter",
+  "pyusb",
+  "libusb-package; sys_platform == 'darwin' or (sys_platform == 'win32' and platform_machine != 'ARM64') or (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64'))",
+]
 
 [project.optional-dependencies]
-hardware = ["pyusb"]
+# Kept so older install commands (pip install -e ".[hardware]") still work.
+hardware = []
 dev = []
 
 [project.scripts]

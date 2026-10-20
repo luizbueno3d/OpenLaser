@@ -33,103 +33,140 @@ G-code.
 The GRBL CO₂ profile is for controllers that accept normal GRBL G-code. It does
 not control Ruida DSP controllers yet.
 
-## Install OpenLaser on a Mac — easiest method
+## Install OpenLaser
 
-You do not need to know programming or Terminal commands for this method.
+OpenLaser runs on **macOS, Windows, and Linux**. Each system has a one-step
+installer, so you do not need to know programming or type commands.
 
-### 1. Download OpenLaser
+| System | Installer to double-click / run | Start OpenLaser with |
+| --- | --- | --- |
+| macOS | `Install OpenLaser.command` | `OpenLaser.app` (drag it to the Dock) |
+| Windows 10 / 11 | `Install OpenLaser.bat` | the **OpenLaser** shortcut on the Desktop and in the Start menu |
+| Linux | `install-openlaser.sh` | **OpenLaser** in your applications menu |
+
+### Step 1: Download OpenLaser (all systems)
 
 1. Open the [OpenLaser GitHub page](https://github.com/luizbueno3d/OpenLaser).
-2. Click the green **Code** button.
-3. Click **Download ZIP**.
-4. Open your Downloads folder.
-5. Double-click the ZIP file to unzip it.
-6. Move the new `OpenLaser` folder to a permanent place such as `Documents`.
+2. Click the green **Code** button, then **Download ZIP**.
+3. Unzip the downloaded file. You get a folder called `OpenLaser-main`. You
+   may rename it to `OpenLaser`.
+4. Move that folder to a permanent place, for example `Documents`.
 
-Do not run OpenLaser directly from the Downloads folder if you intend to move
-it later. The generated app stays connected to the project folder beside it.
+Pick the final place now. The installed app and shortcuts point to this folder.
+If you move it later, just run the installer again.
 
-### 2. Make sure Python is installed
+### Step 2: Install Python 3.10 or newer (if you do not have it)
 
-OpenLaser needs Python 3.10 or newer.
+The installers check for Python and tell you if it is missing.
 
-1. Open [python.org/downloads](https://www.python.org/downloads/).
-2. Download the current Python 3 installer for macOS.
-3. Open the downloaded installer.
-4. Follow the normal installation steps.
+- **macOS and Windows:** download Python from
+  [python.org/downloads](https://www.python.org/downloads/) and run its
+  installer. On **Windows**, tick **"Add python.exe to PATH"** on the first
+  installer screen.
+- **Linux:** use your package manager:
+  - Ubuntu / Debian / Mint: `sudo apt install python3 python3-venv`
+  - Fedora: `sudo dnf install python3`
+  - Arch / Manjaro: `sudo pacman -S python`
 
-If you already have Python 3.10 or newer, you may skip this step. The OpenLaser
-installer checks for it automatically.
+### Step 3: Run the installer for your system
 
-### 3. Run the OpenLaser installer
+**macOS**
 
-1. Open the `OpenLaser` folder.
-2. Find **Install OpenLaser.command**.
-3. Right-click it, or hold Control and click it.
-4. Choose **Open**.
-5. If macOS shows another warning, choose **Open** again.
-6. Wait while the installer creates OpenLaser's private environment and installs
-   its dependencies.
-7. When you see **Done! OpenLaser is installed**, press any key to close the
-   installer window.
+1. Open the OpenLaser folder.
+2. Right-click (or Control-click) **Install OpenLaser.command** and choose
+   **Open**. If macOS warns about an unidentified developer, choose **Open**
+   again.
+3. Wait for **Done! OpenLaser is installed**, then press any key.
+4. Finder selects the new **OpenLaser.app**. Drag it to your **Dock** for
+   one-click launching. Keep the real app inside the OpenLaser folder; the Dock
+   icon is only a shortcut.
 
-The installer creates `OpenLaser.app` inside the same folder.
+**Windows**
 
-### 4. Start OpenLaser
+1. Open the OpenLaser folder.
+2. Double-click **Install OpenLaser.bat**. If Windows SmartScreen says it
+   protected your PC, click **More info**, then **Run anyway**.
+3. Wait for **Done! OpenLaser is installed**, then press any key.
+4. An **OpenLaser** shortcut is now on your Desktop and in the Start menu.
+   Right-click it and choose **Pin to taskbar** for one-click launching.
 
-1. Double-click **OpenLaser.app**.
-2. A Terminal window opens. Leave it open while you use OpenLaser.
-3. Your default web browser opens automatically to `http://127.0.0.1:8765`.
+**Linux**
 
-OpenLaser asks macOS to use your default browser. That may be Safari, Chrome,
-Firefox, or whichever browser you selected in System Settings. You do not need
-to copy the address manually.
+1. Open a terminal in the OpenLaser folder (most file managers have
+   **Open in Terminal** in the right-click menu).
+2. Run `bash install-openlaser.sh`.
+3. When it asks about the **USB permission rule**, answer **Y** if you use a
+   JCZ/LMC MOPA laser. It asks for your password once. GRBL users can answer N.
+4. **OpenLaser** now appears in your applications menu. Right-click it and
+   choose **Add to Favorites** (or **Pin**) for one-click launching.
 
-This address is local to your computer. The interface is displayed in a browser,
-but the job is not uploaded to a website.
+### Step 4: Start and stop OpenLaser
 
-### Add OpenLaser to the Dock — one-click quick launch
+1. Start OpenLaser from the Dock, the Desktop/Start-menu shortcut, or the
+   applications menu.
+2. A small terminal window opens. **Leave it open** while you work; it is the
+   OpenLaser engine.
+3. Your default web browser opens OpenLaser at `http://127.0.0.1:8765`.
 
-The Dock is the row of app icons normally shown at the bottom of your Mac.
+The browser only shows the interface. Everything runs on your own computer;
+nothing is uploaded to a website. Starting OpenLaser again while it is already
+running simply opens the browser again.
 
-1. Open the OpenLaser project folder in Finder.
-2. Find `OpenLaser.app`.
-3. Drag `OpenLaser.app` onto the app area of the Dock.
-4. Release it where you want the icon to stay.
-5. Next time, click that Dock icon once to start OpenLaser.
+To **stop** OpenLaser, close that terminal window. Closing only the browser tab
+does not stop it.
 
-The Dock icon is a shortcut. Keep the real `OpenLaser.app` inside the OpenLaser
-project folder so it can find `.venv` and the rest of the program.
+### Connecting a JCZ/LMC MOPA laser
 
-### 5. Stop OpenLaser
+GRBL CO₂, diode, and plotter users can skip this part: those machines get an
+exported G-code file, not a direct USB connection.
 
-Close the Terminal window that OpenLaser opened, or click that window and press
-Control-C. Closing only the browser tab does not stop the OpenLaser server.
+- **macOS:** nothing extra to do. Plug in the laser and power it on.
+- **Linux:** the installer's USB permission rule is all you need. If you
+  skipped it, run the installer again, or run:
 
-## Install with Terminal — developers and advanced users
+  ```bash
+  sudo cp scripts/99-openlaser.rules /etc/udev/rules.d/99-openlaser.rules
+  sudo udevadm control --reload-rules && sudo udevadm trigger
+  ```
 
-Open Terminal and run these commands one line at a time:
+  Then unplug and replug the laser's USB cable once.
+- **Windows:** the laser normally uses the EZCAD (BJJCZ) driver, which
+  OpenLaser cannot use. Switch it to the free WinUSB driver once:
+  1. Connect the laser by USB and power it on.
+  2. Download **Zadig** from [zadig.akeo.ie](https://zadig.akeo.ie/) and open it.
+  3. In the **Options** menu, enable **List All Devices**.
+  4. Choose **USBLMCV4** in the list (USB ID `9588 9899`).
+  5. Choose **WinUSB** as the target driver and click **Replace Driver**.
+
+  > [!NOTE]
+  > After this, **EZCAD can no longer use the laser on this PC** until you put
+  > its driver back (Device Manager → USBLMCV4 → Update driver → choose the
+  > BJJCZ driver, or reinstall EZCAD's driver). The direct USB path on Windows
+  > has not yet been tested on real hardware by the maintainers; please report
+  > your results in the GitHub issues.
+
+To check the connection without sending any laser command, run `openlaser
+detect` (see [Command-line tools](#command-line-tools)). It reports whether
+your system sees the laser and, if something is missing, what to do next.
+
+### Install with a terminal (developers)
 
 ```bash
 git clone https://github.com/luizbueno3d/OpenLaser.git
 cd OpenLaser
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[hardware]"
+python -m pip install -e .
 openlaser ui
 ```
 
-OpenLaser automatically opens your default browser. On a server or other
-headless computer, use `openlaser ui --no-browser` instead.
+All dependencies install automatically, including `libusb-package`, which
+provides the native USB library on macOS, Windows (x64), and Linux
+(x86-64 / ARM64). On other platforms, such as 32-bit Raspberry Pi OS, install
+your system's libusb instead (`sudo apt install libusb-1.0-0`).
 
-Next time, start it with:
-
-```bash
-cd OpenLaser
-source .venv/bin/activate
-openlaser ui
-```
+Use `openlaser ui --no-browser` on a headless computer.
 
 ## How to use OpenLaser — your first job
 
@@ -178,7 +215,7 @@ or export DXF.
 - Hold Space and drag to pan.
 - Press `f` to fit the artwork on screen.
 - Press `0` to return to the full machine view.
-- Use Command-Z to undo and Shift-Command-Z to redo on macOS.
+- Undo with Command-Z (macOS) or Ctrl-Z (Windows / Linux). Redo with Shift-Command-Z, Ctrl-Y, or Shift-Ctrl-Z.
 
 The design coordinate origin is the center of the displayed work area.
 OpenLaser converts it to the positive coordinates used by GRBL during export.
@@ -352,14 +389,27 @@ Right-click **Install OpenLaser.command**, choose **Open**, and then choose
 **Open** again in the warning dialog. Double-clicking alone may be blocked by
 Gatekeeper the first time.
 
+### Windows says it "protected your PC"
+
+That is SmartScreen, which warns about any downloaded script. Click
+**More info**, then **Run anyway**.
+
 ### The installer says Python is missing
 
-Install Python from [python.org/downloads](https://www.python.org/downloads/),
-then run **Install OpenLaser.command** again.
+Follow [Step 2](#step-2-install-python-310-or-newer-if-you-do-not-have-it),
+then run the installer again. On Windows, if Python is installed but still not
+found, run the Python installer again, choose **Modify**, and make sure
+**Add Python to environment variables** is ticked.
+
+### Linux says the `venv` module is missing
+
+Ubuntu and Debian ship Python without it. The installer prints the exact
+command, for example `sudo apt install python3.12-venv`. Run it, then run the
+installer again.
 
 ### The browser did not open
 
-Leave the OpenLaser Terminal window running and manually open:
+Leave the OpenLaser terminal window running and manually open:
 
 ```text
 http://127.0.0.1:8765
@@ -367,8 +417,8 @@ http://127.0.0.1:8765
 
 ### The page says “Server connection lost”
 
-The Terminal window running OpenLaser was probably closed. Start
-`OpenLaser.app` again.
+The terminal window running OpenLaser was probably closed. Start OpenLaser
+again from the Dock, shortcut, or applications menu.
 
 ### `openlaser: command not found`
 
@@ -376,7 +426,7 @@ Activate the private environment first:
 
 ```bash
 cd OpenLaser
-source .venv/bin/activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 openlaser ui
 ```
 
@@ -385,13 +435,16 @@ openlaser ui
 1. Check machine power.
 2. Reconnect the USB cable.
 3. Try another cable or USB adapter.
-4. Activate the environment and run:
+4. Activate the environment and run `openlaser detect`.
 
-```bash
-openlaser detect
-```
+Detection does not send laser commands. Its `hint` line says what to do next:
 
-Detection does not send laser commands.
+- **Windows sees the laser but OpenLaser cannot open it:** install the WinUSB
+  driver with Zadig; see
+  [Connecting a JCZ/LMC MOPA laser](#connecting-a-jczlmc-mopa-laser).
+- **Linux sees the laser but permission is denied:** install the USB
+  permission rule from the same section, then replug the laser.
+- **libusb could not be loaded:** run the installer again.
 
 ### The JCZ/LMC controller connects but does not respond
 
@@ -438,21 +491,22 @@ uses `openlaser`.
 Mock mode exercises the MOPA software chain without contacting a real board:
 
 ```bash
-OPENMOPA_MOCK=1 openlaser ui
+OPENMOPA_MOCK=1 openlaser ui          # macOS / Linux
+set OPENMOPA_MOCK=1 && openlaser ui   # Windows Command Prompt
 ```
 
 Results clearly report `"mock": true`.
 
 ## Supported platforms
 
-- **macOS:** primary development and packaging platform.
-- **Windows:** browser UI should be portable, but USB and packaging still need
-  hardware validation.
-- **Linux:** browser UI should be portable, but USB permissions and hardware
-  paths still need validation.
+| | macOS | Windows 10 / 11 | Linux |
+| --- | --- | --- | --- |
+| Installer and launcher | ✅ tested | ✅ written; not yet run on a Windows PC by the maintainers | ✅ tested (Ubuntu 24.04) |
+| Design, planning, G-code export | ✅ | ✅ | ✅ |
+| Direct JCZ/LMC MOPA control | ✅ tested on hardware | ⚠️ needs the WinUSB driver; untested on hardware | ⚠️ needs the udev rule; untested on hardware |
 
-Treat Windows and Linux machine control as experimental until tested with the
-specific hardware.
+The test suite runs on macOS and Linux. Please report Windows and Linux
+hardware results in the GitHub issues so this table can be updated.
 
 ## Safety rules enforced by OpenLaser
 
@@ -485,14 +539,16 @@ ventilation, fire prevention, training, or operator attention.
 - Built-in gantry bed sizes and plotter commands are not yet editable in the UI.
 - SVG import supports line-oriented `M`, `L`, `H`, `V`, and `Z` paths; complex
   curves should be flattened before import.
-- Windows and Linux hardware paths need real-machine validation.
+- Windows and Linux direct MOPA control need real-machine validation.
+- On Windows, the laser cannot be shared with EZCAD while it uses the WinUSB
+  driver.
 
 ## Development
 
 Run the complete test suite with:
 
 ```bash
-source .venv/bin/activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 python -m unittest discover -v
 ```
 
@@ -505,8 +561,13 @@ mopa_luiz/layers.py     layer model and operation grouping
 mopa_luiz/raster.py     hatch-fill generation
 mopa_luiz/safety.py     direct-emission safety policy
 mopa_luiz/live.py       JCZ/LMC direct-control path
+mopa_luiz/usb_backend.py  finds a libusb library on every platform
 mopa_luiz/ui.py         local HTTP server and browser interface
 ```
+
+Installers: `Install OpenLaser.command` (macOS), `Install OpenLaser.bat`
+(Windows), `install-openlaser.sh` (Linux). `.gitattributes` keeps their line
+endings correct for each system.
 
 The Python package still uses the internal `mopa_luiz` name for compatibility
 with the original OpenMopa codebase.

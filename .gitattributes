@@ -1,0 +1,6 @@
+# Installers must keep the line endings their operating system expects,
+# whatever the contributor's git settings are.
+*.bat text eol=crlf
+*.sh text eol=lf
+*.command text eol=lf
+*.rules text eol=lf
