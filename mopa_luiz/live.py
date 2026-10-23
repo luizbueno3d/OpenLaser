@@ -1,17 +1,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+import hashlib
 import json
 import math
 import multiprocessing as mp
 import os
 from pathlib import Path
 import signal
+import struct
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
+from galvo.consts import (
+    ExecuteList,
+    ResetList,
+    listDelayTime,
+    listJumpDelay,
+    listJumpSpeed,
+    listJumpTo,
+    listLaserOffDelay,
+    listLaserOnDelay,
+    listLaserOnPoint,
+    listMarkSpeed,
+    listMarkTo,
+    listPolygonDelay,
+    list_command_lookup,
+    single_command_lookup,
+)
 from galvo.controller import GalvoController
 
 from .usb_backend import ensure_libusb_backend
@@ -389,6 +408,13 @@ def connect_controller(
     ensure_libusb_backend()
     field_size = effective_field_size(cfg)
     usb_events: list[str] = []
+    trace = UsbTrace.from_env()
+
+    def usb_log(message: str) -> None:
+        usb_events.append(message)
+        if trace is not None:
+            trace.event("LOG", message=str(message))
+
     controller = GalvoController(
         power=params.power,
         frequency=params.frequency_khz,
@@ -398,9 +424,9 @@ def connect_controller(
         light_speed=FRAME_LIGHT_SPEED_MM_S,
         galvos_per_mm=0xFFFF / field_size,
         mock=mock_mode(),
-        usb_log=usb_events.append,
+        usb_log=usb_log,
     )
-    apply_wait_timeouts(controller)
+    apply_wait_timeouts(controller, trace=trace)
     connect_errors: list[BaseException] = []
 
     def _connect() -> None:
@@ -452,34 +478,414 @@ def connect_controller(
     return controller
 
 
-def apply_wait_timeouts(controller: GalvoController, timeout_s: float = 3.0) -> None:
-    # The spooler thread waits here, holding the list-build lock, before it
-    # pushes its next list packet. On stop it must drop that packet rather than
-    # send it: writing into the board's full list buffer times out, and the
-    # driver then resets the USB device on every following command, so a
-    # stop took 3-6 s and risked wedging the board. The driver's spooler exits
-    # cleanly on ConnectionAbortedError.
-    controller._openlaser_stop = threading.Event()  # type: ignore[attr-defined]
+STATUS_READY = 0x20  # the board can take another list packet
+STATUS_BUSY = 0x04  # the board is executing a list
+LIST_PACKET_BYTES = 0xC00
+# Before ExecuteList nothing drains, so a board that withholds READY is stuck.
+PRE_EXECUTE_WAIT_S = 2.0
+WAIT_BUDGET_FACTOR = 1.5
+WAIT_BUDGET_SLACK_S = 2.0
+WAIT_POLL_S = 0.01
+# galvoplotter documents the laser on/off, polygon and jump delays in us, but
+# MeerK40t sends delay/10, i.e. 10 us units (hardware item H9). Estimates use
+# the longer reading: a generous budget only delays a stop, a tight one aborts
+# good jobs. DelayTime and LaserOnPoint are documented in 10 us units.
+LIST_DELAY_UNIT_S = 10e-6
+LIST_COMMAND_OVERHEAD_S = 10e-6
+FRAME_JUMP_DELAY = 8  # galvoplotter's delay_jump_short
+MARK_DELAYS = (100, 100, 100)  # galvoplotter's laser on, laser off, polygon delays
+MO_OPEN_SETTLE = 800  # listDelayTime(delay_open_mo * 100), 10 us units
 
-    def wait_until(predicate, label: str) -> None:
-        deadline = time.monotonic() + timeout_s
-        while predicate():
-            if time.monotonic() > deadline:
-                return
-            if controller._openlaser_stop.wait(0.01):  # type: ignore[attr-defined]
-                if threading.current_thread() is controller._spooler_thread:
-                    raise ConnectionAbortedError("stop requested")
-                return
+
+class BoardWaitTimeout(RuntimeError):
+    """The board made no progress within its wait budget; the job was stopped."""
+
+
+class _RealWaitClock:
+    def now(self) -> float:
+        return time.monotonic()
+
+    def pause(self, event: threading.Event, seconds: float) -> bool:
+        return event.wait(seconds)
+
+
+# Tests swap this for a virtual clock so long simulated jobs run instantly.
+WAIT_CLOCK: Any = _RealWaitClock()
+
+
+class ListTimeEstimator:
+    """How long the board takes to execute each list command, in seconds.
+
+    Follows the speed and delay settings as they appear in the list. Every
+    doubt resolves towards a longer estimate.
+    """
+
+    def __init__(self, galvos_per_mm: float, jump_mm_s: float, mark_mm_s: float) -> None:
+        self._fallback_jump_units = max(1, int(jump_mm_s * galvos_per_mm / 1000.0))
+        self._fallback_mark_units = max(1, int(mark_mm_s * galvos_per_mm / 1000.0))
+        self.reset()
+
+    def reset(self) -> None:
+        self.jump_units: int | None = None
+        self.mark_units: int | None = None
+        self.jump_delay_s = 0.0
+        self.laser_delays_s = [0.0, 0.0, 0.0]  # on, off, polygon
+        self.x = self.y = 0x8000
+
+    def command_seconds(self, command: int, v1=0, v2=0, v3=0, v4=0, v5=0) -> float:
+        seconds = LIST_COMMAND_OVERHEAD_S
+        if command == listJumpSpeed:
+            self.jump_units = int(v1)
+        elif command == listMarkSpeed:
+            self.mark_units = int(v1)
+        elif command == listJumpDelay:
+            self.jump_delay_s = abs(int(v1)) * LIST_DELAY_UNIT_S
+        elif command == listLaserOnDelay:
+            self.laser_delays_s[0] = abs(int(v1)) * LIST_DELAY_UNIT_S
+        elif command == listLaserOffDelay:
+            self.laser_delays_s[1] = abs(int(v1)) * LIST_DELAY_UNIT_S
+        elif command == listPolygonDelay:
+            self.laser_delays_s[2] = abs(int(v1)) * LIST_DELAY_UNIT_S
+        elif command in (listDelayTime, listLaserOnPoint):
+            seconds += abs(int(v1)) * 10e-6
+        elif command in (listJumpTo, listMarkTo):
+            x, y = int(v1), int(v2)
+            distance = max(float(v4), math.hypot(x - self.x, y - self.y))
+            self.x, self.y = x, y
+            if command == listJumpTo:
+                units = self._fallback_jump_units if self.jump_units is None else self.jump_units
+                seconds += distance / max(1, units) / 1000.0 + self.jump_delay_s
+            else:
+                units = self._fallback_mark_units if self.mark_units is None else self.mark_units
+                seconds += distance / max(1, units) / 1000.0 + sum(self.laser_delays_s)
+        return seconds
+
+
+class UsbTrace:
+    """Opt-in timestamped trace of every USB transfer: OPENMOPA_USB_TRACE=<file>.
+
+    One JSON object per line. Hardware sessions use it to check, for example,
+    that Fiber_SetMo(0) comes only after BUSY clears.
+    """
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = path.open("a", encoding="utf-8", buffering=1)
+        self._lock = threading.Lock()
+
+    @classmethod
+    def from_env(cls) -> "UsbTrace | None":
+        raw = os.environ.get("OPENMOPA_USB_TRACE", "").strip()
+        if not raw:
+            return None
+        try:
+            return cls(Path(raw).expanduser())
+        except OSError:
+            return None
+
+    def event(self, direction: str, **fields: Any) -> None:
+        record = {
+            "ts": datetime.now().isoformat(timespec="microseconds"),
+            "mono": round(time.monotonic(), 6),
+            "pid": os.getpid(),
+            "dir": direction,
+            **fields,
+        }
+        with self._lock:
+            if not self._fh.closed:
+                self._fh.write(json.dumps(record) + "\n")
+
+    def write(self, data: bytes) -> None:
+        if len(data) == 12:
+            words = struct.unpack("<6H", data)
+            self.event("W", op=single_command_lookup.get(words[0], f"0x{words[0]:04x}"), words=list(words))
+            return
+        cmds = [struct.unpack("<6H", data[i:i + 12]) for i in range(0, len(data), 12)]
+        last = max((i for i, c in enumerate(cmds) if c != (0x8002, 0, 0, 0, 0, 0)), default=-1)
+        self.event(
+            "W",
+            op="list",
+            bytes=len(data),
+            sha256=hashlib.sha256(data).hexdigest(),
+            cmds=[[list_command_lookup.get(c[0], f"0x{c[0]:04x}"), *c[1:]] for c in cmds[: last + 1]],
+        )
+
+    def read(self, reply: Any) -> None:
+        words = list(reply) if reply is not None else None
+        status = words[3] if words and len(words) == 4 else None
+        self.event("R", words=words, status=None if status is None or status < 0 else f"0x{status:04x}")
+
+    def close(self) -> None:
+        with self._lock:
+            self._fh.close()
+
+
+class BoardWaits:
+    """Per-wait, progress-aware deadlines for one controller.
+
+    Each list packet's execution time is estimated as it is built. A wait
+    for READY / not BUSY gets its own clock, restarted whenever the status
+    word changes, with a budget of
+        1.5 x max(projected end - now, largest of the last 3 packet estimates) + 2 s
+    where the projected end is the ExecuteList time plus the estimates of
+    every packet written so far. Before ExecuteList nothing drains, so the
+    budget is 2 s. A wait never proceeds on expiry: it latches a fault and
+    stops the job, and no list packet is written after that.
+    """
+
+    def __init__(self, controller: GalvoController, clock: Any, trace: UsbTrace | None = None) -> None:
+        self.controller = controller
+        self.clock = clock
+        self.trace = trace
+        self.stop = threading.Event()
+        self.fault: str | None = None
+        self.fault_at: float | None = None
+        galvos_per_mm = abs(float(getattr(controller, "galvos_per_mm", 0xFFFF / 200.0)))
+        self.estimator = ListTimeEstimator(
+            galvos_per_mm,
+            jump_mm_s=float(getattr(controller, "travel_speed", 0) or 3000.0),
+            mark_mm_s=float(getattr(controller, "mark_speed", 0) or 100.0),
+        )
+        self.packets: list[float] = []
+        self.pending_s = 0.0
+        self.execute_at: float | None = None
+        self.aborting = False
+        self.last_budget_s: float | None = None
+        self.shut_down = False
+        self._shutdown_lock = threading.Lock()
+
+    # -- list bookkeeping ----------------------------------------------------
+    def reset_list(self) -> None:
+        self.packets = []
+        self.pending_s = 0.0
+        self.execute_at = None
+        self.estimator.reset()
+
+    def projected_end(self) -> float | None:
+        if self.execute_at is None:
+            return None
+        return self.execute_at + sum(self.packets)
+
+    def budget(self, now: float) -> float:
+        end = self.projected_end()
+        if end is None:
+            return PRE_EXECUTE_WAIT_S
+        recent = max(self.packets[-3:], default=0.0)
+        return WAIT_BUDGET_FACTOR * max(end - now, recent) + WAIT_BUDGET_SLACK_S
+
+    def on_spooler(self) -> bool:
+        return threading.current_thread() is self.controller._spooler_thread
+
+    def record_fault(self, reason: str) -> str:
+        if self.fault is None:
+            self.fault = reason
+            self.fault_at = self.clock.now()
+            if self.trace is not None:
+                self.trace.event("FAULT", reason=reason)
+        self.stop.set()
+        return self.fault
+
+    # -- the waits -----------------------------------------------------------
+    def wait(self, satisfied: Callable[[int], bool], label: str) -> None:
+        if self.stop.is_set():
+            return self._stopped()
+        controller = self.controller
+        last_status: int | None = None
+        deadline = budget = 0.0
+        while True:
             if not controller._sending:
                 return
+            status = controller.status()
+            # A failed read comes back as -1 (all bits set): never "satisfied".
+            if status >= 0 and satisfied(status):
+                return
+            now = self.clock.now()
+            if status != last_status:
+                last_status = status
+                budget = self.budget(now)
+                deadline = now + budget
+                self.last_budget_s = budget
+            elif now >= deadline:
+                word = "no reply" if status < 0 else f"status 0x{status:04x}"
+                fault = self.record_fault(
+                    f"board not {label} within {budget:.1f} s ({word}, no change). "
+                    "The job was stopped; nothing more was sent. Check the laser, then retry."
+                )
+                if self.on_spooler():
+                    raise ConnectionAbortedError(fault)
+                raise BoardWaitTimeout(fault)
+            if self.clock.pause(self.stop, WAIT_POLL_S):
+                return self._stopped()
 
-    controller.wait_idle = lambda: wait_until(controller.is_busy, "busy")  # type: ignore[method-assign]
-    controller.wait_finished = lambda: wait_until(  # type: ignore[method-assign]
-        lambda: not controller.is_ready_and_not_busy(), "not-ready"
-    )
-    controller.wait_ready = lambda: wait_until(  # type: ignore[method-assign]
-        lambda: not controller.is_ready(), "not-ready"
-    )
+    def _stopped(self) -> None:
+        # The spooler sits in _list_end holding the list-build lock, about to
+        # push its next packet. On stop it must drop that packet: writing into
+        # a full list buffer times out, the driver then resets the USB device
+        # on every following command, and a stop took 3-6 s and risked wedging
+        # the board. galvoplotter's spooler exits cleanly on this error.
+        if self.on_spooler():
+            raise ConnectionAbortedError(self.fault or "stop requested")
+        return None
+
+    def wait_ready(self) -> None:
+        self.wait(lambda s: bool(s & STATUS_READY), "READY")
+
+    def wait_idle(self) -> None:
+        self.wait(lambda s: not s & STATUS_BUSY, "idle")
+
+    def wait_finished(self) -> None:
+        self.wait(lambda s: bool(s & STATUS_READY) and not s & STATUS_BUSY, "READY and idle")
+
+    # -- hooks around galvoplotter ----------------------------------------------
+    def wrap(self, original_list_write: Callable, original_send: Callable, original_shutdown: Callable) -> None:
+        def list_write(command, v1=0, v2=0, v3=0, v4=0, v5=0):
+            seconds = self.estimator.command_seconds(command, v1, v2, v3, v4, v5)
+            # May flush the previous packet first; this command lands in the next one.
+            original_list_write(command, v1, v2, v3, v4, v5)
+            self.pending_s += seconds
+
+        def send(data, read=True):
+            if len(data) == LIST_PACKET_BYTES:
+                if self.fault is not None and not self.aborting:
+                    # Never write a list packet after a watchdog expiry.
+                    if self.on_spooler():
+                        raise ConnectionAbortedError(self.fault)
+                    return None
+                self.packets.append(self.pending_s)
+                self.pending_s = 0.0
+            elif len(data) == 12:
+                opcode = data[0] | (data[1] << 8)
+                if opcode == ResetList:
+                    self.reset_list()
+                elif opcode == ExecuteList and self.execute_at is None:
+                    self.execute_at = self.clock.now()
+            traced = self.trace is not None and self.controller._sending
+            if traced:
+                self.trace.write(bytes(data))
+            reply = original_send(data, read)
+            if traced and read:
+                self.trace.read(reply)
+            return reply
+
+        def shutdown(*args, **kwargs):
+            with self._shutdown_lock:
+                if self.shut_down:
+                    return
+                self.shut_down = True
+            try:
+                original_shutdown(*args, **kwargs)
+            finally:
+                # galvoplotter's send() reconnects (and re-inits the board) if
+                # anything writes after disconnect. Nothing may.
+                self.controller._sending = False
+                if self.trace is not None:
+                    self.trace.close()
+
+        self.controller._list_write = list_write  # type: ignore[method-assign]
+        self.controller.send = send  # type: ignore[method-assign]
+        self.controller.shutdown = shutdown  # type: ignore[method-assign]
+
+
+def apply_wait_timeouts(controller: GalvoController, *, clock: Any = None, trace: UsbTrace | None = None) -> BoardWaits:
+    """Replace galvoplotter's unbounded waits with per-wait, progress-aware deadlines."""
+    waits = BoardWaits(controller, clock or WAIT_CLOCK, trace)
+    controller._openlaser_waits = waits  # type: ignore[attr-defined]
+    controller._openlaser_stop = waits.stop  # type: ignore[attr-defined]
+    controller.wait_ready = waits.wait_ready  # type: ignore[method-assign]
+    controller.wait_idle = waits.wait_idle  # type: ignore[method-assign]
+    controller.wait_finished = waits.wait_finished  # type: ignore[method-assign]
+    waits.wrap(controller._list_write, controller.send, controller.shutdown)
+    return waits
+
+
+def _guard_job(controller: GalvoController, job: Callable, on_fault: Callable[[str], None] | None = None) -> Callable:
+    """Wrap a spooler job so a stop or fault always releases the main thread.
+
+    galvoplotter's _spooler_run returns on ConnectionAbortedError without
+    removing the job, so wait_for_spooler_send would wait forever. Clearing
+    the queue here, after the list-build lock is released, keeps lock order.
+    """
+    waits: BoardWaits = controller._openlaser_waits  # type: ignore[attr-defined]
+
+    def guarded(c: GalvoController) -> bool:
+        try:
+            return job(c)
+        except BaseException as exc:
+            if not isinstance(exc, ConnectionAbortedError):
+                waits.record_fault(f"hardware job failed: {type(exc).__name__}: {exc}")
+            with c._spooler_lock:
+                c._queue.clear()
+                c._spooler_lock.notify_all()
+            if waits.fault is not None and on_fault is not None:
+                on_fault(waits.fault)
+            if isinstance(exc, ConnectionAbortedError):
+                raise
+            raise ConnectionAbortedError(waits.fault) from exc
+
+    return guarded
+
+
+def _run_job(controller: GalvoController, job: Callable) -> None:
+    """Submit a one-shot list job, wait until the board finishes it, surface faults."""
+    waits: BoardWaits = controller._openlaser_waits  # type: ignore[attr-defined]
+    controller.submit(_guard_job(controller, job))
+    with controller._spooler_lock:
+        while controller._queue:
+            thread = controller._spooler_thread
+            if thread is not None and not thread.is_alive():
+                waits.record_fault("the galvo spooler stopped before the job was sent")
+                break
+            controller._spooler_lock.wait(0.1)
+    if waits.fault is None:
+        controller.wait_finished()
+    if waits.fault is not None:
+        raise BoardWaitTimeout(waits.fault)
+    if waits.stop.is_set():
+        raise RuntimeError("hardware stop requested before the board finished the job")
+
+
+def hardware_job_timeout_s(estimate_s: float) -> float:
+    """Outer deadline for a spawned hardware job: max(60 s, 2 x estimate + 60 s)."""
+    return max(HARDWARE_JOB_TIMEOUT_S, 2.0 * max(0.0, estimate_s) + HARDWARE_JOB_TIMEOUT_S)
+
+
+def _paths_seconds(
+    polylines: list[list[list[float]]], galvos_per_mm: float, jump_mm_s: float, draw_mm_s: float, mark: bool
+) -> float:
+    timer = ListTimeEstimator(galvos_per_mm, jump_mm_s, draw_mm_s)
+    timer.command_seconds(listJumpSpeed, int(jump_mm_s * galvos_per_mm / 1000.0))
+    timer.command_seconds(listJumpDelay, FRAME_JUMP_DELAY)
+    if mark:
+        timer.command_seconds(listMarkSpeed, int(draw_mm_s * galvos_per_mm / 1000.0))
+        for command, delay in zip((listLaserOnDelay, listLaserOffDelay, listPolygonDelay), MARK_DELAYS):
+            timer.command_seconds(command, delay)
+    seconds = 0.0
+    for polyline in polylines:
+        points = []
+        for raw in polyline:
+            if len(raw) < 2:
+                continue
+            x, y = float(raw[0]), float(raw[1])
+            if math.isfinite(x) and math.isfinite(y):
+                points.append((0x8000 + x * galvos_per_mm, 0x8000 + y * galvos_per_mm))
+        for index, (x, y) in enumerate(points):
+            command = listMarkTo if (mark and index) else listJumpTo
+            seconds += timer.command_seconds(command, x, y)
+    return seconds
+
+
+def estimate_mark_seconds(cfg: MarkConfig, params: JobParams, polylines: list[list[list[float]]]) -> float:
+    """Estimated execution time of one mark_polylines pass."""
+    galvos_per_mm = 0xFFFF / effective_field_size(cfg)
+    return MO_OPEN_SETTLE * 10e-6 + _paths_seconds(polylines, galvos_per_mm, 3000.0, params.mark_speed, True)
+
+
+def estimate_frame_seconds(cfg: MarkConfig, polylines: list[list[list[float]]]) -> float:
+    """Estimated execution time of one frame_polylines run (all its retraces)."""
+    galvos_per_mm = 0xFFFF / effective_field_size(cfg)
+    points = sum(1 for polyline in polylines for raw in polyline if len(raw) >= 2)
+    one_pass = _paths_seconds(polylines, galvos_per_mm, FRAME_LIGHT_SPEED_MM_S, FRAME_LIGHT_SPEED_MM_S, False)
+    return frame_once_repeats(polylines, points) * one_pass
 
 
 def read_board_status() -> dict[str, Any]:
@@ -526,8 +932,7 @@ def frame_box(cfg: MarkConfig, params: JobParams) -> dict[str, Any]:
                     c.light(*point)
             return True
 
-        controller.submit(job)
-        controller.wait_for_machine_idle()
+        _run_job(controller, job)
         return {
             "ok": True,
             "operation": "frame",
@@ -544,6 +949,7 @@ class FrameLoop:
         self._lock = threading.Lock()
         self._controller: GalvoController | None = None
         self._points: list[tuple[int, int]] = []
+        self._fault: str | None = None
 
     @property
     def running(self) -> bool:
@@ -564,6 +970,7 @@ class FrameLoop:
         ).raise_if_blocked()
         with self._lock:
             self.stop()
+            self._fault = None
             field_size = effective_field_size(cfg)
             job_paths = sanitize_polylines(polylines, field_size) if polylines else [box_points(params.size_mm, field_size)]
             self._points = [pt for path in job_paths for pt in path]
@@ -571,7 +978,9 @@ class FrameLoop:
 
             def loop_job(c: GalvoController) -> bool:
                 if c._openlaser_stop.is_set():  # type: ignore[attr-defined]
-                    return True
+                    # Leave the spooler here; returning True would run
+                    # initial_configuration() outside any handler.
+                    raise ConnectionAbortedError("stop requested")
                 c.lighting_configuration()
                 for path in job_paths:
                     c.dark(*path[0])
@@ -579,7 +988,7 @@ class FrameLoop:
                         c.light(*point)
                 return False
 
-            controller.submit(loop_job)
+            controller.submit(_guard_job(controller, loop_job, on_fault=lambda reason: self._on_fault(controller, reason)))
             self._controller = controller
             return {
                 "ok": True,
@@ -588,6 +997,22 @@ class FrameLoop:
                 "mock": mock_mode(),
                 "points": self._points,
             }
+
+    def _on_fault(self, controller: GalvoController, reason: str) -> None:
+        """The board stopped making progress: stop the loop as a user Stop would.
+
+        Runs on the spooler thread, which shutdown() joins, so it hands off.
+        """
+
+        def stop_faulted() -> None:
+            with self._lock:
+                if self._controller is controller:
+                    self._controller = None
+                    self._points = []
+                self._fault = reason
+            stop_controller(controller)
+
+        threading.Thread(target=stop_faulted, name="openlaser-frame-fault-stop", daemon=True).start()
 
     def stop(self) -> dict[str, Any]:
         controller = self._controller
@@ -607,6 +1032,7 @@ class FrameLoop:
                 "running": self._controller is not None,
                 "points": self._points,
                 "emission_enabled": False,
+                "fault": self._fault,
             }
 
 
@@ -646,8 +1072,7 @@ def mark_box(cfg: MarkConfig, params: JobParams, arm: bool, confirm: str) -> dic
                     c.mark(*mm_to_galvo(*end_mm, field_size))
             return True
 
-        controller.submit(job)
-        controller.wait_for_machine_idle()
+        _run_job(controller, job)
         return {
             "ok": True,
             "operation": "mark",
@@ -687,8 +1112,7 @@ def frame_polylines(cfg: MarkConfig, params: JobParams, polylines: list[list[lis
                             c.light(*point)
             return True
 
-        controller.submit(job)
-        controller.wait_for_machine_idle()
+        _run_job(controller, job)
         return {
             "ok": True,
             "operation": "frame_geometry",
@@ -734,8 +1158,7 @@ def mark_polylines(
                         c.mark(*point)
             return True
 
-        controller.submit(job)
-        controller.wait_for_machine_idle()
+        _run_job(controller, job)
         return {
             "ok": True,
             "operation": "mark_geometry",

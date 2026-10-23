@@ -40,7 +40,10 @@ from .live import (
     save_scale_correction,
     mock_mode,
     effective_field_size,
+    estimate_frame_seconds,
+    estimate_mark_seconds,
     geometry_errors,
+    hardware_job_timeout_s,
 )
 from .machines import machine_by_id, machine_catalog
 from .profile import inspect as inspect_profile_data
@@ -2631,22 +2634,24 @@ class UiHandler(BaseHTTPRequestHandler):
                 arm = bool(payload.get("arm"))
                 confirm = str(payload.get("confirm", ""))
                 polylines = first_burn_polylines(kind)
+                test_params = JobParams(
+                    text="",
+                    power=params["power"],
+                    frequency_khz=params["frequency_khz"],
+                    pulse_width_ns=params["pulse_width_ns"],
+                    size_mm=10.0,
+                    mark_speed=params["mark_speed"],
+                )
                 self.send_json(
                     HTTPStatus.OK,
                     run_hardware_job(
                         "mark_polylines",
                         cfg,
-                        JobParams(
-                            text="",
-                            power=params["power"],
-                            frequency_khz=params["frequency_khz"],
-                            pulse_width_ns=params["pulse_width_ns"],
-                            size_mm=10.0,
-                            mark_speed=params["mark_speed"],
-                        ),
+                        test_params,
                         polylines,
                         arm=arm,
                         confirm=confirm,
+                        timeout_s=hardware_job_timeout_s(estimate_mark_seconds(cfg, test_params, polylines)),
                     ),
                 )
                 return
@@ -2787,7 +2792,10 @@ class UiHandler(BaseHTTPRequestHandler):
                 FRAME_LOOP.stop()
                 clear_stop_request()
                 if framing_polylines:
-                    self.send_json(HTTPStatus.OK, run_hardware_job("frame_polylines", cfg, params, framing_polylines))
+                    self.send_json(HTTPStatus.OK, run_hardware_job(
+                        "frame_polylines", cfg, params, framing_polylines,
+                        timeout_s=hardware_job_timeout_s(estimate_frame_seconds(cfg, framing_polylines)),
+                    ))
                 else:
                     self.send_json(HTTPStatus.OK, run_hardware_job("frame_box", cfg, params))
                 return
@@ -2867,7 +2875,9 @@ class UiHandler(BaseHTTPRequestHandler):
                                 arm=bool(live.get("arm")),
                                 confirm=str(live.get("confirm", "")),
                                 operation=layer.operation,
-                                timeout_s=600.0,
+                                timeout_s=hardware_job_timeout_s(
+                                    estimate_mark_seconds(cfg, layer_params, step["polylines"])
+                                ),
                             ))
                             results[-1].update({"repeat": repeat_index + 1})
                             if raster_result is not None:

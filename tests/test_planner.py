@@ -147,6 +147,24 @@ class PlanAndMarkTests(unittest.TestCase):
             self.assertEqual(result["status"], 200)
             self.assertEqual(patched.call_count, 1)
 
+    def test_mark_outer_timeout_scales_with_the_job_estimate(self):
+        from mopa_luiz import live
+
+        lines = [[(-20.0, float(y)), (20.0, float(y))] for y in range(-25, 25)]
+        layers = default_layers()
+        for layer in layers:
+            if layer.layer_id == "vector-engrave":
+                layer.speed_mm_s = 50.0
+        objects = [{"layer_id": "vector-engrave", "polylines": lines}]
+        with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
+            patched.return_value = {"ok": True}
+            result = call_post(self.handler_cls, "/api/mark", self._payload(objects=objects, layers=layers))
+        self.assertEqual(result["status"], 200)
+        _, cfg, layer_params, polylines = patched.call_args.args
+        estimate = live.estimate_mark_seconds(cfg, layer_params, polylines)
+        self.assertGreater(estimate, 35.0)  # 50 x 40 mm at 50 mm/s
+        self.assertEqual(patched.call_args.kwargs["timeout_s"], 2 * estimate + 60.0)
+
     def test_raster_layer_emits_hatch_lines_for_closed_shape(self):
         layers = default_layers()
         for layer in layers:

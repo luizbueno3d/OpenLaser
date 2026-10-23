@@ -73,7 +73,14 @@ class StubHangingController:
         self._usb_log = kwargs.get("usb_log") or (lambda message: None)
         self.mock = kwargs.get("mock", False)
         self._sending = True
+        self._spooler_thread = None
         self.abort_requested = False
+
+    def _list_write(self, *args):
+        pass
+
+    def send(self, data, read=True):
+        return None
 
     def connect_if_needed(self):
         self._usb_log("Attempting to claim interface.")
