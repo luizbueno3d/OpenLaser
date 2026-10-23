@@ -104,7 +104,7 @@ class BoardLock:
                 "another OpenLaser process holds the board (a running job, frame loop or the ol app). "
                 f"Stop it, then retry. Lock: {path}"
             ) from None
-        self._release_lock = threading.Lock()
+        self._release_lock = threading.RLock()
 
     @staticmethod
     def _lock(fd: int) -> None:
@@ -241,12 +241,12 @@ class JobParams:
 
 def stop_controller(controller: GalvoController) -> None:
     """Release any pending board waits, then abort and disconnect."""
-    waits = getattr(controller, "_openlaser_waits", None)
-    if waits is not None and waits.trace is not None and not waits.shut_down:
-        waits.trace.event("STOP", source="stop_controller")
     stop_event = getattr(controller, "_openlaser_stop", None)
     if stop_event is not None:
         stop_event.set()
+    waits = getattr(controller, "_openlaser_waits", None)
+    if waits is not None and waits.trace is not None and not waits.shut_down:
+        waits.trace.event("STOP", source="stop_controller")
     controller.shutdown()
 
 
@@ -634,6 +634,11 @@ LIST_PACKET_BYTES = 0xC00
 PRE_EXECUTE_WAIT_S = 2.0
 WAIT_BUDGET_FACTOR = 1.5
 WAIT_BUDGET_SLACK_S = 2.0
+# The board's list-buffer depth is unknown (hardware item H2). A one-shot list
+# counts every packet it wrote as possibly still queued; the frame loop's list
+# never ends, so it counts this many of its latest packets.
+STREAM_QUEUE_WINDOW_PACKETS = 16
+STATUS_PROGRESS_BITS = 0x20 | 0x04  # READY, BUSY
 WAIT_POLL_S = 0.01
 # galvoplotter documents the laser on/off, polygon and jump delays in us, but
 # MeerK40t sends delay/10, i.e. 10 us units (hardware item H9). Estimates use
@@ -723,7 +728,9 @@ class UsbTrace:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = path.open("a", encoding="utf-8", buffering=1)
-        self._lock = threading.Lock()
+        # Re-entrant: the job child's SIGTERM handler may trace while this
+        # thread is already writing a record.
+        self._lock = threading.RLock()
 
     @classmethod
     def from_env(cls) -> "UsbTrace | None":
@@ -736,18 +743,28 @@ class UsbTrace:
             return None
 
     def event(self, direction: str, **fields: Any) -> None:
-        record = {
-            "ts": datetime.now().isoformat(timespec="microseconds"),
-            "mono": round(time.monotonic(), 6),
-            "pid": os.getpid(),
-            "dir": direction,
-            **fields,
-        }
-        with self._lock:
-            if not self._fh.closed:
-                self._fh.write(json.dumps(record) + "\n")
+        """Best effort: a trace failure must never block or skip a USB command."""
+        try:
+            record = {
+                "ts": datetime.now().isoformat(timespec="microseconds"),
+                "mono": round(time.monotonic(), 6),
+                "pid": os.getpid(),
+                "dir": direction,
+                **fields,
+            }
+            with self._lock:
+                if not self._fh.closed:
+                    self._fh.write(json.dumps(record) + "\n")
+        except Exception:
+            pass
 
     def write(self, data: bytes) -> None:
+        try:
+            self._write(data)
+        except Exception:
+            pass
+
+    def _write(self, data: bytes) -> None:
         if len(data) == 12:
             words = struct.unpack("<6H", data)
             self.event("W", op=single_command_lookup.get(words[0], f"0x{words[0]:04x}"), words=list(words))
@@ -763,26 +780,36 @@ class UsbTrace:
         )
 
     def read(self, reply: Any) -> None:
-        words = list(reply) if reply is not None else None
-        status = words[3] if words and len(words) == 4 else None
-        self.event("R", words=words, status=None if status is None or status < 0 else f"0x{status:04x}")
+        try:
+            words = list(reply) if reply is not None else None
+            status = words[3] if words and len(words) == 4 else None
+            self.event("R", words=words, status=None if status is None or status < 0 else f"0x{status:04x}")
+        except Exception:
+            pass
 
     def close(self) -> None:
-        with self._lock:
-            self._fh.close()
+        try:
+            with self._lock:
+                self._fh.close()
+        except Exception:
+            pass
 
 
 class BoardWaits:
     """Per-wait, progress-aware deadlines for one controller.
 
     Each list packet's execution time is estimated as it is built. A wait
-    for READY / not BUSY gets its own clock, restarted whenever the status
-    word changes, with a budget of
-        1.5 x max(projected end - now, largest of the last 3 packet estimates) + 2 s
-    where the projected end is the ExecuteList time plus the estimates of
-    every packet written so far. Before ExecuteList nothing drains, so the
-    budget is 2 s. A wait never proceeds on expiry: it latches a fault and
-    stops the job, and no list packet is written after that.
+    for READY / not BUSY gets its own clock with a budget of
+        1.5 x (estimated time of every packet that may still be queued) + 2 s.
+    For a one-shot job that is every packet written to its list, so a board
+    that runs behind the estimate, or holds many packets, still finishes:
+    a generous budget only delays a stop, a tight one aborts good jobs. The
+    frame loop's list never ends, so it counts its last
+    STREAM_QUEUE_WINDOW_PACKETS packets, and its clock restarts when a valid
+    status read shows READY or BUSY change (a failed read, or another bit,
+    is not progress). Before ExecuteList nothing drains, so the budget is
+    2 s. A wait never proceeds on expiry: it latches a fault and stops the
+    job, and no list packet is written after that.
     """
 
     def __init__(self, controller: GalvoController, clock: Any, trace: UsbTrace | None = None) -> None:
@@ -801,10 +828,13 @@ class BoardWaits:
         self.packets: list[float] = []
         self.pending_s = 0.0
         self.execute_at: float | None = None
+        self.streaming = False  # set by the frame loop, whose list never ends
         self.aborting = False
         self.last_budget_s: float | None = None
         self.shut_down = False
-        self._shutdown_lock = threading.Lock()
+        # Re-entrant: the job child's SIGTERM handler runs on the main thread,
+        # possibly while that thread is inside these locks.
+        self._shutdown_lock = threading.RLock()
         self._shutdown_thread: int | None = None
         self._shutdown_done = threading.Event()
         self.board_lock: BoardLock | None = None
@@ -816,17 +846,15 @@ class BoardWaits:
         self.execute_at = None
         self.estimator.reset()
 
-    def projected_end(self) -> float | None:
-        if self.execute_at is None:
-            return None
-        return self.execute_at + sum(self.packets)
+    def queued_s(self) -> float:
+        """Estimated time of every packet that may still be queued on the board."""
+        packets = self.packets[-STREAM_QUEUE_WINDOW_PACKETS:] if self.streaming else self.packets
+        return sum(packets)
 
-    def budget(self, now: float) -> float:
-        end = self.projected_end()
-        if end is None:
+    def budget(self) -> float:
+        if self.execute_at is None:
             return PRE_EXECUTE_WAIT_S
-        recent = max(self.packets[-3:], default=0.0)
-        return WAIT_BUDGET_FACTOR * max(end - now, recent) + WAIT_BUDGET_SLACK_S
+        return WAIT_BUDGET_FACTOR * self.queued_s() + WAIT_BUDGET_SLACK_S
 
     def on_spooler(self) -> bool:
         return threading.current_thread() is self.controller._spooler_thread
@@ -845,8 +873,9 @@ class BoardWaits:
         if self.stop.is_set():
             return self._stopped()
         controller = self.controller
-        last_status: int | None = None
-        deadline = budget = 0.0
+        progress_bits: int | None = None
+        deadline: float | None = None
+        budget = 0.0
         while True:
             if not controller._sending:
                 return
@@ -855,24 +884,28 @@ class BoardWaits:
             if status >= 0 and satisfied(status):
                 return
             now = self.clock.now()
-            if status != last_status:
-                last_status = status
-                budget = self.budget(now)
+            progressed = False
+            if status >= 0:
+                bits = status & STATUS_PROGRESS_BITS
+                progressed = progress_bits is not None and bits != progress_bits
+                progress_bits = bits
+            restart = progressed and self.streaming and self.execute_at is not None
+            if deadline is None or restart:
+                budget = self.budget()
                 deadline = now + budget
                 self.last_budget_s = budget
                 if self.trace is not None:
-                    end = self.projected_end()
                     self.trace.event(
                         "WAIT",
                         label=label,
                         status=None if status < 0 else f"0x{status:04x}",
                         budget_s=round(budget, 3),
-                        projected_end_in_s=None if end is None else round(end - now, 3),
+                        queued_s=round(self.queued_s(), 3),
                     )
             elif now >= deadline:
                 word = "no reply" if status < 0 else f"status 0x{status:04x}"
                 fault = self.record_fault(
-                    f"board not {label} within {budget:.1f} s ({word}, no change). "
+                    f"board not {label} within {budget:.1f} s ({word}). "
                     "The job was stopped; nothing more was sent. Check the laser, then retry."
                 )
                 if self.on_spooler():
@@ -966,10 +999,10 @@ class BoardWaits:
                 self._shutdown_done.set()
 
         def disconnect(*args, **kwargs):
-            try:
-                return original_disconnect(*args, **kwargs)
-            finally:
-                self.controller._sending = False
+            # Before closing: a re-entrant abort (SIGTERM) during the slow USB
+            # reset must find nothing to send, or galvoplotter reconnects.
+            self.controller._sending = False
+            return original_disconnect(*args, **kwargs)
 
         self.controller._list_write = list_write  # type: ignore[method-assign]
         self.controller.send = send  # type: ignore[method-assign]
@@ -1254,6 +1287,7 @@ class FrameLoop:
             )
             self._points = [pt for path in job_paths for pt in path]
             controller = connect_controller(cfg, params)
+            controller._openlaser_waits.streaming = True  # type: ignore[attr-defined]
 
             def loop_job(c: GalvoController) -> bool:
                 if c._openlaser_stop.is_set():  # type: ignore[attr-defined]
@@ -1291,7 +1325,9 @@ class FrameLoop:
                 if self._controller is controller:
                     self._controller = None
                     self._points = []
-                self._fault = reason
+                    self._fault = reason
+                elif self._controller is None:
+                    self._fault = reason  # stopped meanwhile: still say why
             stop_controller(controller)
 
         threading.Thread(target=stop_faulted, name="openlaser-frame-fault-stop", daemon=True).start()

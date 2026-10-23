@@ -133,6 +133,80 @@ class StuckBoardTests(unittest.TestCase):
                 controller.shutdown()
 
 
+def zigzag_job(paths: int = 10, points: int = 920, step_mm: float = 0.1) -> list:
+    """About 9200 short marks: 36 list packets."""
+    return [[[-46.0 + j * step_mm, -40.0 + i * 8.0] for j in range(points)] for i in range(paths)]
+
+
+class BudgetTests(unittest.TestCase):
+    def test_board_behind_its_estimate_with_a_small_buffer_still_finishes(self):
+        job = params(power=10.0, speed=100.0)
+        paths = zigzag_job()
+        per_packet = live.estimate_mark_seconds(CFG, job, paths) / 36
+        for capacity, slowdown in ((4, 1.1), (4, 1.33), (8, 1.33)):
+            with self.subTest(capacity=capacity, slowdown=slowdown):
+                clock = VirtualClock()
+                board = FakeLmcBoard(clock, capacity=capacity, drain_s=slowdown * per_packet)
+                with fake_board(board, virtual_clock=clock):
+                    _, error = call_with_deadline(
+                        self, lambda: live.mark_polylines(CFG, job, paths, arm=True, confirm="ARM"), 60.0
+                    )
+                self.assertIsNone(error)
+                self.assertEqual(len([e for e in board.lists() if e["n_real"]]), 36)
+                execute_at = board.singles("ExecuteList")[0]["t"]
+                first_close = [e for e in mo_events(board, 0) if e["t"] > execute_at][0]["t"]
+                self.assertGreaterEqual(first_close - execute_at, 36 * slowdown * per_packet - 0.01)
+                stop = board.singles("StopExecute")[0]["t"]
+                self.assertGreater(stop, first_close, "StopExecute only in the end-of-job abort")
+                self.assertEqual(board.violations, [])
+
+    def test_failed_reads_do_not_restart_the_clock(self):
+        clock = VirtualClock()
+        board = FakeLmcBoard(clock, ready=False, read_failures=2)
+        with fake_board(board, virtual_clock=clock):
+            _, error = call_with_deadline(
+                self, lambda: live.mark_polylines(CFG, params(), BOX10, arm=True, confirm="ARM")
+            )
+        self.assertIsInstance(error, live.BoardWaitTimeout)
+        mo_open = mo_events(board, 1)[0]["t"]
+        self.assertLessEqual([e["t"] for e in mo_events(board, 0) if e["t"] > mo_open][0] - mo_open, 2.5)
+
+    def test_a_flickering_bit_does_not_keep_a_stuck_job_alive(self):
+        clock = VirtualClock()
+        board = FakeLmcBoard(clock, busy_s=float("inf"), flicker_ready=True)
+        with fake_board(board, virtual_clock=clock):
+            _, error = call_with_deadline(
+                self, lambda: live.mark_polylines(CFG, params(), BOX10, arm=True, confirm="ARM")
+            )
+        self.assertIsInstance(error, live.BoardWaitTimeout)
+        self.assertIn("not idle", str(error))
+        execute_at = board.singles("ExecuteList")[0]["t"]
+        self.assertLess(board.singles("StopExecute")[0]["t"] - execute_at, 3.0)
+
+    def test_frame_loop_budget_does_not_grow_with_session_length(self):
+        clock = VirtualClock()
+        board = FakeLmcBoard(clock, capacity=4, drain_s=0.25)
+        loop = live.FrameLoop()
+        with fake_board(board, virtual_clock=clock):
+            loop.start(CFG, params(), SQUARE20)
+            waits = live._ACTIVE_CONTROLLER._openlaser_waits
+            try:
+                self.assertTrue(wait_until(lambda: len(waits.packets) >= 3))
+                board.drain_s = waits.packets[1] / 4  # the board runs 4x faster than estimated
+                self.assertTrue(wait_until(lambda: clock.now() >= 120.0, 60.0))
+                per_packet = max(waits.packets)
+                written = len(waits.packets)
+                board.drain_s = None  # freeze
+                frozen_at = clock.now()
+                self.assertTrue(wait_until(lambda: not loop.running, 60.0))
+            finally:
+                loop.stop()
+        window = live.WAIT_BUDGET_FACTOR * live.STREAM_QUEUE_WINDOW_PACKETS * per_packet + 2.0
+        self.assertGreater(written, 300)
+        self.assertLessEqual(waits.fault_at - frozen_at, window + 1.0)
+        self.assertLess(window, 60.0)
+
+
 class FrameLoopWatchdogTests(unittest.TestCase):
     def test_frame_loop_runs_60s_on_a_board_that_drains_a_packet_per_second(self):
         clock = VirtualClock()

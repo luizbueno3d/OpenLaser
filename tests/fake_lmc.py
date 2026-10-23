@@ -101,6 +101,9 @@ class FakeLmcBoard:
       ExecuteList the board executes one packet every `drain_s` seconds
       (`drain_s=None`: never, so READY sticks low once the buffer is full).
       BUSY while anything is queued.
+    * `flicker_ready=True`: the READY bit toggles on every status read.
+    * `read_failures=N`: every Nth status read fails (galvoplotter then
+      reports (-1, -1, -1, -1)).
     """
 
     def __init__(
@@ -112,6 +115,8 @@ class FakeLmcBoard:
         capacity: int | None = None,
         drain_s: float | None = None,
         transfer_s: float = 0.0002,
+        flicker_ready: bool = False,
+        read_failures: int = 0,
     ) -> None:
         self.clock = clock or RealClock()
         self.busy_s = busy_s
@@ -119,6 +124,9 @@ class FakeLmcBoard:
         self.capacity = capacity
         self.drain_s = drain_s
         self.transfer_s = transfer_s
+        self.flicker_ready = flicker_ready
+        self.read_failures = read_failures
+        self._reads = 0
         self.devices: dict[int, bool] = {}
         self.events: list[dict] = []
         self.violations: list[dict] = []
@@ -150,7 +158,8 @@ class FakeLmcBoard:
                     status |= BUSY
                 return status
             busy = self.exec_at is not None and now - self.exec_at < self.busy_s
-            return READY | (BUSY if busy else 0)
+            ready = READY if not self.flicker_ready or self._reads % 2 else 0
+            return ready | (BUSY if busy else 0)
 
     # -- galvoplotter connection interface ----------------------------------
     def is_open(self, index=0):
@@ -210,7 +219,11 @@ class FakeLmcBoard:
     def read(self, index=0):
         status = self.status()
         with self._lock:
+            self._reads += 1
             self.clock.advance(self.transfer_s)
+            if self.read_failures and self._reads % self.read_failures == 0:
+                self._record({"kind": "read", "after": "?", "status": None, "failed": True})
+                raise ConnectionError("fake read failure")
             self._record({
                 "kind": "read",
                 "after": single_command_lookup.get(self._last_single, "?"),
