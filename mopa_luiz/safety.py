@@ -105,6 +105,17 @@ def evaluate_emission(
     )
 
 
+def mark_speed_units(speed_mm_s: float, field_size_mm: float) -> int:
+    """The listMarkSpeed value, encoded exactly as galvoplotter does (galvo units per ms)."""
+    galvos_per_mm = 0xFFFF / field_size_mm
+    return min(int(speed_mm_s * galvos_per_mm / 1000.0), 0xFFFF)
+
+
+def actual_mark_speed(speed_mm_s: float, field_size_mm: float) -> float:
+    """The speed the board really runs once the requested speed is truncated to whole units."""
+    return mark_speed_units(speed_mm_s, field_size_mm) * 1000.0 * field_size_mm / 0xFFFF
+
+
 def validate_layer_settings(
     *,
     operation: str,

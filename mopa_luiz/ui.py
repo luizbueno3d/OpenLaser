@@ -10,7 +10,15 @@ from pathlib import Path
 from urllib.parse import urlparse
 import urllib.request
 
-from .cli import build_test_box_plan, config_summary, detect_report, load_markcfg, pyusb_probe
+from .cli import (
+    build_test_box_plan,
+    config_summary,
+    detect_report,
+    load_markcfg,
+    nearest_pulse_width,
+    pulse_width_table,
+    pyusb_probe,
+)
 from .geometry import bounding_box, join_lines
 from .gcode import compile_gcode
 from .importers import import_geometry
@@ -47,7 +55,7 @@ from .live import (
 )
 from .machines import machine_by_id, machine_catalog
 from .profile import inspect as inspect_profile_data
-from .safety import evaluate_emission
+from .safety import actual_mark_speed, evaluate_emission, mark_speed_units
 
 
 FRAME_LOOP = FrameLoop()
@@ -589,6 +597,9 @@ HTML = """<!doctype html>
     .modal .errs { color: var(--bad); margin: 8px 0; font-size: 12px; }
     .modal .warns { color: var(--accent2); margin: 8px 0; font-size: 12px; }
     .modal .cta { display: flex; gap: 8px; margin-top: 14px; }
+    .modal .confirmRows { width: 100%; border-collapse: collapse; font-size: 12px; margin: 6px 0 10px; }
+    .modal .confirmRows th, .modal .confirmRows td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+    .modal .confirmRows th { color: var(--muted); font-weight: 600; }
     .contextMenu {
       position: fixed;
       min-width: 190px;
@@ -804,9 +815,9 @@ HTML = """<!doctype html>
             <label>Scale correction<input id="scaleCorrection" type="number" min="0.5" max="2" step="0.0001" value="1"></label>
           </div>
           <div class="info">
-            <strong>Legacy frame parameters</strong>
-            These values are only for red-light framing / planning defaults, not for normal layer marking.
-            Marking uses the selected layer's power, frequency, pulse, speed, and passes from Cuts / Layers.
+            <strong>Frame settings (red light only)</strong>
+            Used only for red-light framing; they never reach a burn. Marking always uses each
+            layer's own power, frequency, pulse, speed and passes, shown row by row in the Mark confirmation.
           </div>
           <div class="grid2">
             <label>Frame Power %<input id="power" type="number" min="0" max="100" step="1" value="100"></label>
@@ -1540,10 +1551,6 @@ HTML = """<!doctype html>
       });
       const armText = document.getElementById('confirm').value.trim().toUpperCase();
       const armOk = armText === 'ARM';
-      const power = Number(document.getElementById('power').value);
-      const freq = Number(document.getElementById('frequency').value);
-      const pulse = Number(document.getElementById('pulseWidth').value);
-      const speed = Number(document.getElementById('markSpeed').value);
       const layerErrors = layers.flatMap(l => (l._errors || []).map(e => `${l.name}: ${e}`));
       const emittingLayers = layers.filter(l => l.output && !['disabled','frame_only'].includes(l.operation));
       const rasterLayers = layers.filter(l => l.output && l.visible !== false && l.operation === 'raster_engrave');
@@ -1555,13 +1562,9 @@ HTML = """<!doctype html>
         <div class="row"><span>Paths</span><span>${polylines.length}</span></div>
         <div class="row"><span>BBox</span><span>${bbox}</span></div>
         ${rasterLayers.length ? `<div class="row"><span>Raster lines</span><span>${lastRasterLineCount}</span></div>` : ''}
-        <div class="row"><span>Power %</span><span>${power}</span></div>
-        <div class="row"><span>Freq kHz</span><span>${freq}</span></div>
-        <div class="row"><span>Pulse ns</span><span>${pulse}</span></div>
-        <div class="row"><span>Speed mm/s</span><span>${speed}</span></div>
         <div class="row ${armOk ? 'good':'bad'}"><span>ARM</span><span>${armOk ? 'typed' : 'missing'}</span></div>
         <div class="row ${willEmit ? 'bad':'good'}"><span>Will emit?</span><span>${willEmit ? 'YES' : 'no'}</span></div>
-        ${layerStats.map(s => `<div class="row"><span>· ${s.layer.name}</span><span>${s.objs} obj / ${s.paths} paths · ${s.layer.operation}</span></div>`).join('')}
+        ${layerStats.map(s => `<div class="row"><span>· ${escapeHtml(s.layer.name)}</span><span>${s.objs} obj / ${s.paths} paths · ${s.layer.operation}${s.layer.output && !['disabled','frame_only'].includes(s.layer.operation) ? ` · ${s.layer.power_percent}% ${s.layer.frequency_khz} kHz ${s.layer.pulse_width_ns} ns ${s.layer.speed_mm_s} mm/s` : ''}</span></div>`).join('')}
         ${layerErrors.length ? `<div class="row bad"><span>Layer errors</span><span>${layerErrors.length}</span></div>` : ''}
       `;
       document.getElementById('mark').disabled =
@@ -2195,6 +2198,10 @@ HTML = """<!doctype html>
       } catch (e) { show(e); }
     });
 
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+    }
+
     function openModal({ title, body, onConfirm }) {
       document.getElementById('modalTitle').textContent = title;
       document.getElementById('modalBody').innerHTML = body;
@@ -2210,20 +2217,25 @@ HTML = """<!doctype html>
       const payload = buildJobPayload();
       try {
         const preview = await postJson('/api/plan', payload);
-        const params = payload.live;
         const selectedOnly = document.getElementById('selectedOnly').checked;
         const errs = (preview.safety && preview.safety.errors) || [];
         const warns = (preview.safety && preview.safety.warnings) || [];
         if (errs.length) { show({ refused: errs }); return; }
+        // Only the server's per-layer rows: the values each layer will actually burn with.
+        const rows = preview.emission_rows || [];
+        const rowHtml = rows.map(r => `<tr>
+            <td>${escapeHtml(r.name)}</td><td>${r.power_percent}%</td><td>${r.frequency_khz} kHz</td>
+            <td>${r.pulse_width_ns} ns</td><td>${Number(r.actual_speed_mm_s).toFixed(2)} mm/s</td>
+            <td>${r.passes}×</td><td>${r.path_count}</td></tr>`).join('');
         const body = `
-          <p>Laser will emit now. Power ${params.power}%,
-          Frequency ${params.frequency_khz} kHz,
-          Pulse ${params.pulse_width_ns} ns,
-          Speed ${params.mark_speed} mm/s.</p>
-          <p>${preview.emitting_paths || 0} path(s) across ${preview.emitting_layers || 0} layer(s).
-          Bounding box ${preview.bbox ? preview.bbox.width.toFixed(2) + ' × ' + preview.bbox.height.toFixed(2) + ' mm' : '—'}.</p>
-          <p>Scope: ${selectedOnly ? 'selected objects only' : 'all objects'}. Repeat: ${params.repeat_count}×.</p>
-          ${warns.length ? `<div class="warns">${warns.join('<br>')}</div>` : ''}
+          <p>Laser will emit now, with each layer's own settings:</p>
+          <table class="confirmRows">
+            <thead><tr><th>Layer</th><th>Power</th><th>Freq</th><th>Pulse</th><th>Speed (actual)</th><th>Passes</th><th>Paths</th></tr></thead>
+            <tbody>${rowHtml}</tbody>
+          </table>
+          <p>Repeat: ${preview.repeat_count}×. Bounding box ${preview.bbox ? preview.bbox.width.toFixed(2) + ' × ' + preview.bbox.height.toFixed(2) + ' mm' : '—'}.
+          Scope: ${selectedOnly ? 'selected objects only' : 'all objects'}.</p>
+          ${warns.length ? `<div class="warns">${warns.map(escapeHtml).join('<br>')}</div>` : ''}
         `;
         openModal({
           title: 'Confirm marking',
@@ -2777,6 +2789,9 @@ class UiHandler(BaseHTTPRequestHandler):
                     ],
                     "layer_errors": layer_errors,
                     "safety": safety_report,
+                    # The Mark confirmation shows only these: what each layer will burn.
+                    "emission_rows": emission_rows(emission_steps(emitting), cfg, effective_field_size(cfg)),
+                    "repeat_count": repeat_count_from(live),
                     "frame_settings": {
                         "power_percent": params.power,
                         "frequency_khz": params.frequency_khz,
@@ -2812,7 +2827,7 @@ class UiHandler(BaseHTTPRequestHandler):
                     raise ValueError("direct machine control is not enabled for this profile; export G-code instead")
                 FRAME_LOOP.stop()
                 clear_stop_request()
-                repeat_count = max(1, min(999, int(live.get("repeat_count", 1) or 1)))
+                repeat_count = repeat_count_from(live)
                 layer_errors = validate_layers(layers, cfg)
                 if layer_errors:
                     self.send_json(HTTPStatus.BAD_REQUEST, {
@@ -2906,6 +2921,32 @@ def job_params_from_payload(payload: dict) -> JobParams:
         size_mm=float(payload.get("size_mm", 10)),
         mark_speed=float(payload.get("mark_speed", 1000)),
     )
+
+
+def repeat_count_from(live: dict) -> int:
+    return max(1, min(999, int(live.get("repeat_count", 1) or 1)))
+
+
+def emission_rows(steps: list[dict], cfg, field_size_mm: float) -> list[dict]:
+    """One row per emitting layer with the values the board will actually get."""
+    table = pulse_width_table(cfg)
+    rows = []
+    for step in steps:
+        layer = step["job"].layer
+        rows.append({
+            "layer_id": layer.layer_id,
+            "name": layer.name,
+            "operation": layer.operation,
+            "power_percent": layer.power_percent,
+            "frequency_khz": layer.frequency_khz,
+            "pulse_width_ns": nearest_pulse_width(layer.pulse_width_ns, table),
+            "speed_mm_s": layer.speed_mm_s,
+            "actual_speed_mm_s": round(actual_mark_speed(layer.speed_mm_s, field_size_mm), 3),
+            "speed_units": mark_speed_units(layer.speed_mm_s, field_size_mm),
+            "passes": max(1, layer.passes),
+            "path_count": len(step["polylines"]),
+        })
+    return rows
 
 
 def emission_steps(emitting: list) -> list[dict]:
