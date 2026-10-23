@@ -76,6 +76,28 @@ class GroupingTests(unittest.TestCase):
         # but disabled is excluded — and there is no disabled object here.
         self.assertGreaterEqual(len(framing), 1)
 
+    def test_object_on_an_unknown_layer_is_refused_not_dropped(self):
+        objects = [
+            {"layer_id": "vector-engrave", "polylines": [[(0, 0), (1, 1)]]},
+            {"name": "Logo", "layer_id": "deleted-layer", "polylines": [[(0, 0), (2, 2)]]},
+        ]
+        with self.assertRaisesRegex(ValueError, "Logo is on layer 'deleted-layer', which does not exist"):
+            group_by_layer(objects, default_layers())
+
+    def test_object_without_a_layer_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "which does not exist"):
+            group_by_layer([{"polylines": [[(0, 0), (1, 1)]]}], default_layers())
+
+    def test_three_coordinate_point_is_refused_not_a_crash(self):
+        objects = [{"name": "Mesh", "layer_id": "vector-engrave", "polylines": [[(0, 0, 0), (1, 1, 0)]]}]
+        with self.assertRaisesRegex(ValueError, "Mesh has a point with 3 coordinate"):
+            group_by_layer(objects, default_layers())
+
+    def test_one_coordinate_or_scalar_point_is_refused(self):
+        for bad in ([(0,), (1, 1)], [0, (1, 1)]):
+            with self.assertRaisesRegex(ValueError, "only 2-D"):
+                group_by_layer([{"layer_id": "vector-engrave", "polylines": [bad]}], default_layers())
+
     def test_layer_from_dict_round_trip(self):
         spec = LayerSpec(
             layer_id="custom", name="Custom", operation="vector_engrave",

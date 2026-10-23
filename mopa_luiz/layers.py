@@ -173,17 +173,31 @@ def group_by_layer(
 
     `objects` is a list of dicts with at least `layer_id` and `polylines`
     (already transformed into mm world coordinates by the caller).
-    Objects whose `layer_id` does not match any layer are dropped silently.
+    An object on a layer that does not exist (B8), or a point that is not
+    exactly (x, y) (B9), is refused with ValueError rather than dropped.
     """
     by_id = {layer.layer_id: layer for layer in layers}
     buckets: dict[str, list[list[tuple[float, float]]]] = {layer.layer_id: [] for layer in layers}
-    for obj in objects:
+    for index, obj in enumerate(objects):
+        name = str(obj.get("name") or f"Object {index + 1}")
         layer_id = str(obj.get("layer_id") or "")
         if layer_id not in by_id:
-            continue
+            raise ValueError(
+                f"{name} is on layer '{layer_id}', which does not exist, so it would never be "
+                "framed or marked. Move it to a layer, then plan again."
+            )
         polylines = obj.get("polylines") or []
         for poly in polylines:
-            cleaned = [(float(x), float(y)) for x, y in poly if len(poly) >= 2]
+            cleaned = []
+            for point in poly:
+                try:
+                    size = len(point)
+                except TypeError:
+                    size = None
+                if size != 2:
+                    detail = "a malformed point" if size is None else f"a point with {size} coordinate(s)"
+                    raise ValueError(f"{name} has {detail}; only 2-D (x, y) points can be framed or marked.")
+                cleaned.append((float(point[0]), float(point[1])))
             if len(cleaned) >= 2:
                 buckets[layer_id].append(cleaned)
     return [LayerJob(layer=by_id[lid], polylines=buckets[lid]) for lid in by_id]

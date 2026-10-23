@@ -282,6 +282,20 @@ class PlanAndMarkTests(unittest.TestCase):
         patched.assert_not_called()
         self.assertEqual(board.events, [], "the driver re-check refuses before any USB traffic")
 
+    def test_orphan_object_and_3d_points_are_refused_by_plan_frame_and_mark(self):
+        bad_jobs = [
+            [{"name": "Ghost", "layer_id": "nope", "polylines": [[(0, 0), (5, 0)]]}],
+            [{"name": "Mesh", "layer_id": "vector-engrave", "polylines": [[(0, 0, 1), (5, 0, 1)]]}],
+        ]
+        for objects in bad_jobs:
+            with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
+                for path in ("/api/plan", "/api/frame", "/api/mark"):
+                    result = call_post(self.handler_cls, path, self._payload(objects=objects))
+                    self.assertEqual(result["status"].value, 400, (path, result))
+                    self.assertTrue("does not exist" in result["payload"]["error"]
+                                    or "only 2-D" in result["payload"]["error"], result)
+            patched.assert_not_called()
+
     def test_plan_warns_when_only_frame_only_geometry(self):
         objects = [{"layer_id": "frame-only", "polylines": [[(0, 0), (5, 0)]]}]
         result = call_post(self.handler_cls, "/api/plan", self._payload(objects=objects))
