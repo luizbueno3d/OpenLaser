@@ -1,8 +1,8 @@
 import threading
 import time
-import types
 import unittest
 
+from mopa_luiz import live
 from mopa_luiz.live import (
     FRAME_ONCE_SECONDS,
     FRAME_LIGHT_SPEED_MM_S,
@@ -14,48 +14,49 @@ from mopa_luiz.live import (
     mm_to_galvo,
     sanitize_polylines,
 )
-
-
-def busy_board():
-    board = types.SimpleNamespace(
-        _sending=True,
-        _spooler_thread=None,
-        is_busy=lambda: True,
-        is_ready=lambda: False,
-        is_ready_and_not_busy=lambda: False,
-    )
-    apply_wait_timeouts(board, timeout_s=5.0)
-    return board
+from tests.fake_lmc import FakeLmcBoard, fake_board
 
 
 class StopLatencyTests(unittest.TestCase):
+    """A stop must release every board wait within one 10 ms poll."""
+
+    def setUp(self):
+        # A board that never raises READY, so every wait would block.
+        self.board = FakeLmcBoard(ready=False)
+        self._env = fake_board(self.board)
+        self._env.__enter__()
+        self.addCleanup(self._env.__exit__, None, None, None)
+        self.controller = live.GalvoController(galvos_per_mm=0xFFFF / 200.0)
+        self.board.open()
+        apply_wait_timeouts(self.controller)
+
     def test_stop_aborts_the_spooler_instead_of_sending_its_packet(self):
-        board = busy_board()
+        controller = self.controller
         outcome = {}
 
         def spooler():
             started = time.monotonic()
             try:
-                board.wait_ready()
+                controller.wait_ready()
                 outcome["result"] = "returned"
             except ConnectionAbortedError:
                 outcome["result"] = "aborted"
             outcome["seconds"] = time.monotonic() - started
 
         thread = threading.Thread(target=spooler)
-        board._spooler_thread = thread
+        controller._spooler_thread = thread
         thread.start()
         time.sleep(0.05)
-        board._openlaser_stop.set()
+        controller._openlaser_stop.set()
         thread.join(2.0)
         self.assertEqual(outcome.get("result"), "aborted")
         self.assertLess(outcome["seconds"], 1.0)
+        self.assertEqual(self.board.lists(), [])
 
     def test_stop_releases_other_waits_without_raising(self):
-        board = busy_board()
-        board._openlaser_stop.set()
+        self.controller._openlaser_stop.set()
         started = time.monotonic()
-        board.wait_finished()
+        self.controller.wait_finished()
         self.assertLess(time.monotonic() - started, 1.0)
 
 

@@ -289,10 +289,13 @@ This path is only for the built-in JCZ/LMC JPT M7 profile.
 3. Click **Frame Once** to trace the job with the red aiming light.
 4. Confirm the frame is entirely inside the fixture/material.
 5. Recheck every layer's power, frequency, pulse width, speed, and passes.
-6. Type `ARM` exactly in the ARM box.
+6. Type `ARM` exactly in the ARM box. It clears when the dialog closes, so type
+   it again for every job.
 7. Click **Mark Job**.
-8. Read the final confirmation dialog.
-9. Confirm only when the area is safe and you are ready for emission.
+8. Read the final confirmation dialog: one row per layer with the power,
+   frequency, pulse width, actual speed and passes that layer will burn with.
+9. Confirm only when the area is safe and you are ready for emission. The
+   confirmation is valid for this exact job for 60 seconds, once.
 10. Stay with the machine until the job finishes.
 
 Use **Start Continuous Frame** only while positioning. Click **Stop Frame** when
@@ -367,6 +370,10 @@ The Advanced panel includes **Scale correction** for the direct MOPA profile.
 
 Example: a 50 mm square measures 59.17 mm. Enter `1.1834`.
 
+A correction above 1 lets the galvo reach past the lens's rated field, but the
+work area stays the profile's `FIELDSIZE` (200 mm for the JPT M7 profile):
+artwork outside ±100 mm is refused for both Frame and Mark.
+
 Calibration is stored locally in `calibration.json`. OpenLaser does not modify
 your original JCZ correction or mark configuration files.
 
@@ -414,6 +421,12 @@ Leave the OpenLaser terminal window running and manually open:
 ```text
 http://127.0.0.1:8765
 ```
+
+### The browser shows “Request refused”
+
+OpenLaser was opened through a network name or address, such as the
+computer's name or a `192.168…` address. It only answers its own page on this
+computer: open `http://127.0.0.1:8765` instead.
 
 ### The page says “Server connection lost”
 
@@ -516,8 +529,28 @@ For direct MOPA emission:
 - Frequency must be inside the machine profile limits.
 - Pulse width must match the machine profile's allowed table.
 - At least one markable path must exist.
-- The operator must type `ARM`.
-- A final confirmation is required before emission.
+- Every point must lie inside the work area: the lens's rated field, or the
+  calibrated galvo reach if that is smaller. Points outside are refused, never
+  clamped.
+- A layer speed that the controller would encode as 0 (below about 3.6 mm/s at
+  the calibrated field) is refused, with the minimum named.
+- A hidden layer with Output on is refused, because framing skips it.
+- An object on a layer that does not exist, or a point that is not (x, y), is
+  refused rather than dropped.
+- The operator must type `ARM`, and the final confirmation sends a single-use
+  token issued for that exact job; it expires after 60 seconds.
+- The local server answers only requests addressed to `127.0.0.1`, `localhost`
+  or `[::1]` on its own port, and refuses any POST sent by another web page.
+  This stops a malicious website from reaching the laser through DNS
+  rebinding or a cross-site request.
+- Only one OpenLaser process may drive the board at a time
+  (`~/Library/Application Support/OpenLaser/board.lock` on macOS).
+- If the board stops making progress (no READY or idle within a budget derived
+  from the job's estimated time), the job is stopped, never continued:
+  StopExecute, MO closed, ports off.
+
+Set `OPENMOPA_USB_TRACE=/path/to/trace.jsonl` before starting OpenLaser to
+record a timestamped trace of every USB command and status reply.
 
 For GRBL export:
 
