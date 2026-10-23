@@ -64,6 +64,85 @@ SCALE_CORRECTION_MIN = 0.5
 SCALE_CORRECTION_MAX = 2.0
 
 
+def default_board_lock_path() -> Path:
+    """Where OpenLaser processes (this prototype and the Rust `ol`) lock the board."""
+    override = os.environ.get("OPENLASER_BOARD_LOCK", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "OpenLaser" / "board.lock"
+    if sys.platform.startswith("win"):
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "OpenLaser" / "board.lock"
+    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "openlaser" / "board.lock"
+
+
+BOARD_LOCK_PATH = default_board_lock_path()
+
+
+class BoardBusyError(RuntimeError):
+    """Another OpenLaser process holds the board lock; USB was not touched."""
+
+
+class BoardLock:
+    """An exclusive, non-blocking lock on BOARD_LOCK_PATH (flock; msvcrt on Windows).
+
+    Held from before the USB device is opened until after it is closed, so
+    galvoplotter's reset-and-retry can never run against a board another
+    OpenLaser process is driving. The OS drops it if the process dies.
+    """
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        self._fd: int | None = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            self._lock(self._fd)
+        except OSError:
+            os.close(self._fd)
+            self._fd = None
+            raise BoardBusyError(
+                "another OpenLaser process holds the board (a running job, frame loop or the ol app). "
+                f"Stop it, then retry. Lock: {path}"
+            ) from None
+        self._release_lock = threading.Lock()
+
+    @staticmethod
+    def _lock(fd: int) -> None:
+        try:
+            import fcntl
+        except ImportError:  # Windows
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    @property
+    def held(self) -> bool:
+        return self._fd is not None
+
+    def release(self) -> None:
+        with self._release_lock:
+            fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        try:
+            try:
+                import fcntl
+            except ImportError:
+                import msvcrt
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+
 def mock_mode() -> bool:
     """OPENMOPA_MOCK=1 exercises the full command chain on a mock connection."""
     return os.environ.get("OPENMOPA_MOCK", "") == "1"
@@ -442,6 +521,19 @@ def text_segments(text: str, size_mm: float) -> list[tuple[tuple[float, float], 
 def connect_controller(
     cfg: MarkConfig, params: JobParams, connect_timeout_s: float = CONNECT_TIMEOUT_S
 ) -> GalvoController:
+    # Mock mode never opens USB, so it needs no board lock.
+    board_lock = None if mock_mode() else BoardLock(BOARD_LOCK_PATH)
+    try:
+        return _connect_locked(cfg, params, connect_timeout_s, board_lock)
+    except BaseException:
+        if board_lock is not None and board_lock.held and not getattr(board_lock, "handed_off", False):
+            board_lock.release()
+        raise
+
+
+def _connect_locked(
+    cfg: MarkConfig, params: JobParams, connect_timeout_s: float, board_lock: BoardLock | None
+) -> GalvoController:
     # Hardware jobs run in fresh spawned processes, so load libusb here too.
     ensure_libusb_backend()
     field_size = effective_field_size(cfg)
@@ -464,7 +556,8 @@ def connect_controller(
         mock=mock_mode(),
         usb_log=usb_log,
     )
-    apply_wait_timeouts(controller, trace=trace)
+    waits = apply_wait_timeouts(controller, trace=trace)
+    waits.board_lock = board_lock
     connect_errors: list[BaseException] = []
 
     def _connect() -> None:
@@ -482,6 +575,17 @@ def connect_controller(
     if worker.is_alive() or connect_errors:
         controller.abort_connect()
         controller._sending = False  # make shutdown() safe: no further USB writes
+        if worker.is_alive() and board_lock is not None:
+            # galvoplotter may still be resetting and retrying USB: keep the
+            # board locked until its connect loop gives up.
+            waits.board_lock = None
+            board_lock.handed_off = True  # type: ignore[attr-defined]
+
+            def release_after_connect_loop() -> None:
+                worker.join()
+                board_lock.release()
+
+            threading.Thread(target=release_after_connect_loop, name="openlaser-lock-release", daemon=True).start()
         try:
             controller.shutdown()
         except Exception:
@@ -694,6 +798,7 @@ class BoardWaits:
         self.last_budget_s: float | None = None
         self.shut_down = False
         self._shutdown_lock = threading.Lock()
+        self.board_lock: BoardLock | None = None
 
     # -- list bookkeeping ----------------------------------------------------
     def reset_list(self) -> None:
@@ -821,6 +926,8 @@ class BoardWaits:
                 self.controller._sending = False
                 if self.trace is not None:
                     self.trace.close()
+                if self.board_lock is not None:
+                    self.board_lock.release()
 
         self.controller._list_write = list_write  # type: ignore[method-assign]
         self.controller.send = send  # type: ignore[method-assign]
