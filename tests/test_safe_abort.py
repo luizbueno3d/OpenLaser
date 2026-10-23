@@ -80,6 +80,33 @@ class SafeAbortTests(unittest.TestCase):
         ops = [e["op"] for e in board.singles()]
         self.assertEqual(ops[-2:], ["Fiber_SetMo", "WritePort"])
 
+    def test_sigterm_during_shutdown_still_closes_mo_and_never_reconnects(self):
+        board = FakeLmcBoard()
+        with fake_board(board):
+            controller = live.connect_controller(CFG, params())
+            original_stop = controller.stop_execute
+            interrupted = []
+
+            def stop_then_sigterm():
+                original_stop()
+                if not interrupted:
+                    interrupted.append(True)
+                    controller.shutdown()  # what the SIGTERM handler runs, on this same thread
+
+            with mock.patch.object(controller, "stop_execute", side_effect=stop_then_sigterm):
+                controller.shutdown()
+            sent = len(board.events)
+            controller.abort()  # anything after disconnect must not reach (or reconnect to) the board
+            controller.shutdown()
+        self.assertEqual(len(board.events), sent)
+        singles = board.singles()
+        start = next(i for i, e in enumerate(singles) if e["op"] == "StopExecute")
+        tail = [(e["op"], e["words"][1]) for e in singles[start:]]
+        self.assertEqual(tail.count(("StopExecute", 0)), 2)
+        self.assertEqual(tail.count(("Fiber_SetMo", 0)), 4)
+        self.assertEqual(tail.count(("WritePort", 0)), 2)
+        self.assertEqual(tail[-2:], [("Fiber_SetMo", 0), ("WritePort", 0)])
+
     def test_abort_after_red_light_turns_the_pointer_off_too(self):
         board = FakeLmcBoard()
         with fake_board(board):

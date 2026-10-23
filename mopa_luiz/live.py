@@ -798,6 +798,8 @@ class BoardWaits:
         self.last_budget_s: float | None = None
         self.shut_down = False
         self._shutdown_lock = threading.Lock()
+        self._shutdown_thread: int | None = None
+        self._shutdown_done = threading.Event()
         self.board_lock: BoardLock | None = None
 
     # -- list bookkeeping ----------------------------------------------------
@@ -851,6 +853,15 @@ class BoardWaits:
                 budget = self.budget(now)
                 deadline = now + budget
                 self.last_budget_s = budget
+                if self.trace is not None:
+                    end = self.projected_end()
+                    self.trace.event(
+                        "WAIT",
+                        label=label,
+                        status=None if status < 0 else f"0x{status:04x}",
+                        budget_s=round(budget, 3),
+                        projected_end_in_s=None if end is None else round(end - now, 3),
+                    )
             elif now >= deadline:
                 word = "no reply" if status < 0 else f"status 0x{status:04x}"
                 fault = self.record_fault(
@@ -883,7 +894,13 @@ class BoardWaits:
         self.wait(lambda s: bool(s & STATUS_READY) and not s & STATUS_BUSY, "READY and idle")
 
     # -- hooks around galvoplotter ----------------------------------------------
-    def wrap(self, original_list_write: Callable, original_send: Callable, original_shutdown: Callable) -> None:
+    def wrap(
+        self,
+        original_list_write: Callable,
+        original_send: Callable,
+        original_shutdown: Callable,
+        original_disconnect: Callable | None = None,
+    ) -> None:
         def list_write(command, v1=0, v2=0, v3=0, v4=0, v5=0):
             seconds = self.estimator.command_seconds(command, v1, v2, v3, v4, v5)
             # May flush the previous packet first; this command lands in the next one.
@@ -914,10 +931,21 @@ class BoardWaits:
             return reply
 
         def shutdown(*args, **kwargs):
+            me = threading.get_ident()
             with self._shutdown_lock:
-                if self.shut_down:
-                    return
+                first = not self.shut_down
                 self.shut_down = True
+                if first:
+                    self._shutdown_thread = me
+            if not first:
+                if self._shutdown_thread == me:
+                    # Re-entered on the same thread: the SIGTERM handler has
+                    # interrupted this thread's own shutdown, which stays
+                    # suspended until the process exits. Stop the board now.
+                    self.controller.abort()
+                else:
+                    self._shutdown_done.wait(GRACEFUL_STOP_TIMEOUT_S)
+                return
             try:
                 original_shutdown(*args, **kwargs)
             finally:
@@ -928,10 +956,19 @@ class BoardWaits:
                     self.trace.close()
                 if self.board_lock is not None:
                     self.board_lock.release()
+                self._shutdown_done.set()
+
+        def disconnect(*args, **kwargs):
+            try:
+                return original_disconnect(*args, **kwargs)
+            finally:
+                self.controller._sending = False
 
         self.controller._list_write = list_write  # type: ignore[method-assign]
         self.controller.send = send  # type: ignore[method-assign]
         self.controller.shutdown = shutdown  # type: ignore[method-assign]
+        if original_disconnect is not None:
+            self.controller.disconnect = disconnect  # type: ignore[method-assign]
 
 
 def apply_wait_timeouts(controller: GalvoController, *, clock: Any = None, trace: UsbTrace | None = None) -> BoardWaits:
@@ -942,7 +979,7 @@ def apply_wait_timeouts(controller: GalvoController, *, clock: Any = None, trace
     controller.wait_ready = waits.wait_ready  # type: ignore[method-assign]
     controller.wait_idle = waits.wait_idle  # type: ignore[method-assign]
     controller.wait_finished = waits.wait_finished  # type: ignore[method-assign]
-    waits.wrap(controller._list_write, controller.send, controller.shutdown)
+    waits.wrap(controller._list_write, controller.send, controller.shutdown, getattr(controller, "disconnect", None))
     controller.abort = _safe_abort(controller, waits)  # type: ignore[method-assign]
     return waits
 

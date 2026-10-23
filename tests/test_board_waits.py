@@ -201,7 +201,7 @@ class UsbTraceTests(unittest.TestCase):
     def test_trace_records_timestamped_writes_and_reads(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "trace.jsonl"
-            board = FakeLmcBoard()
+            board = FakeLmcBoard(busy_s=0.05)
             with fake_board(board), mock.patch.dict(os.environ, {"OPENMOPA_USB_TRACE": str(path)}):
                 live.mark_polylines(CFG, params(), BOX10, arm=True, confirm="ARM")
             records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
@@ -214,6 +214,8 @@ class UsbTraceTests(unittest.TestCase):
         self.assertEqual(packets[0]["sha256"], MARK_BOX10_LIST_SHA)
         self.assertEqual(packets[0]["cmds"][0][0], "listReadyMark")
         self.assertTrue(any(r["dir"] == "R" and r["status"] == "0x0020" for r in records))
+        idle = [r for r in records if r["dir"] == "WAIT" and r["label"] == "idle"]
+        self.assertTrue(idle and idle[0]["budget_s"] > live.WAIT_BUDGET_SLACK_S)
 
     def test_no_trace_file_without_the_env_var(self):
         with mock.patch.dict(os.environ, {"OPENMOPA_USB_TRACE": ""}):
