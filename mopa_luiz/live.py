@@ -495,6 +495,9 @@ LIST_COMMAND_OVERHEAD_S = 10e-6
 FRAME_JUMP_DELAY = 8  # galvoplotter's delay_jump_short
 MARK_DELAYS = (100, 100, 100)  # galvoplotter's laser on, laser off, polygon delays
 MO_OPEN_SETTLE = 800  # listDelayTime(delay_open_mo * 100), 10 us units
+# The abort's end-of-list packet goes out only if READY shows within this.
+ABORT_READY_POLL_S = 0.05
+DUMMY_LIST_PACKET = bytes([0x02, 0x80] + [0] * 10) * 256  # 256 x listEndOfList
 
 
 class BoardWaitTimeout(RuntimeError):
@@ -795,7 +798,73 @@ def apply_wait_timeouts(controller: GalvoController, *, clock: Any = None, trace
     controller.wait_idle = waits.wait_idle  # type: ignore[method-assign]
     controller.wait_finished = waits.wait_finished  # type: ignore[method-assign]
     waits.wrap(controller._list_write, controller.send, controller.shutdown)
+    controller.abort = _safe_abort(controller, waits)  # type: ignore[method-assign]
     return waits
+
+
+def _quietly(command: Callable[[], Any]) -> None:
+    try:
+        command()
+    except Exception:
+        pass
+
+
+def _ready_within(controller: GalvoController, waits: BoardWaits, seconds: float) -> bool:
+    """Poll READY without ever raising; a failed read is not READY."""
+    never = threading.Event()  # the stop event is set during a stop, so pause on this one
+    deadline = waits.clock.now() + seconds
+    while controller._sending:
+        try:
+            status = controller.status()
+        except Exception:
+            return False
+        if status >= 0 and status & STATUS_READY:
+            return True
+        if waits.clock.now() >= deadline:
+            return False
+        waits.clock.pause(never, WAIT_POLL_S)
+    return False
+
+
+def _safe_abort(controller: GalvoController, waits: BoardWaits) -> Callable:
+    """galvoplotter's abort(), made safe for a board that is not READY.
+
+    galvoplotter's version reaches its end-of-list packet through _list_end,
+    whose wait_ready can raise, which skips the final MO close and port off.
+    OpenLaser aborts after every job, so this runs on every shutdown:
+    StopExecute -> MO(0) -> ResetList; the end-of-list packet, SetEndOfList
+    and ExecuteList only if READY shows within 50 ms; and always, last,
+    MO(0) and WritePort(0). Nothing in here raises. With a READY board the
+    bytes are identical to galvoplotter's abort.
+    """
+
+    def abort(dummy_packet: bool = True) -> None:
+        with controller._list_build_lock:
+            waits.aborting = True
+            try:
+                _quietly(controller.stop_execute)
+                _quietly(lambda: controller.set_fiber_mo(0))
+                _quietly(controller.reset_list)
+                if dummy_packet and _ready_within(controller, waits, ABORT_READY_POLL_S):
+                    controller.send(DUMMY_LIST_PACKET, False)
+                    controller.set_end_of_list(0)
+                    if not controller._list_executing:
+                        controller.execute_list()
+            except Exception:
+                pass
+            finally:
+                controller._active_list = None
+                controller._active_index = 0
+                controller._list_executing = False
+                controller._number_of_list_packets = 0
+                _quietly(lambda: controller.set_fiber_mo(0))
+                controller.port_off(controller.laser_pin)
+                controller._port_bits = 0  # laser and red-light bits off: WritePort(0)
+                _quietly(controller.write_port)
+                controller.laser_configuration = "initial"
+                waits.aborting = False
+
+    return abort
 
 
 def _guard_job(controller: GalvoController, job: Callable, on_fault: Callable[[str], None] | None = None) -> Callable:

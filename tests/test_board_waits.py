@@ -119,7 +119,7 @@ class StuckBoardTests(unittest.TestCase):
             started = time.monotonic()
             live.stop_controller(controller)
         self.assertLess(time.monotonic() - started, 1.0)
-        self.assertEqual([e for e in board.lists() if e["n_real"]], [])
+        self.assertEqual(board.lists(), [])
 
     def test_a_failed_status_read_never_counts_as_ready(self):
         board = FakeLmcBoard()
