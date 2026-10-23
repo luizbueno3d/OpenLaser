@@ -5,6 +5,7 @@ HTTP server or contacting the controller. Marking is patched at the
 `run_hardware_job` boundary, since the test environment has no laser.
 """
 
+import http.client
 import io
 import json
 import textwrap
@@ -27,30 +28,28 @@ SAMPLE_MARKCFG = textwrap.dedent("""\
 """)
 
 
-class FakeRequest:
-    def __init__(self, body: bytes):
-        self._buf = io.BytesIO(body)
-
-    def makefile(self, mode, *args, **kwargs):
-        return self._buf if "r" in mode else io.BytesIO()
+TEST_PORT = 8765
 
 
-def call_post(handler_cls, path, payload):
-    body = json.dumps(payload).encode("utf-8")
-    request = FakeRequest(
-        f"POST {path} HTTP/1.1\r\nContent-Length: {len(body)}\r\n\r\n".encode("utf-8") + body
-    )
-    response = io.BytesIO()
-    rfile = io.BytesIO(body)
+def call_handler(handler_cls, method, path, body=b"", headers=None):
+    """Run one request through the handler, as the UI page on 127.0.0.1 would send it.
+
+    `headers` adds or overrides request headers; a None value removes one
+    (e.g. {"Host": None}).
+    """
+    sent = {"Host": f"127.0.0.1:{TEST_PORT}", "Content-Length": str(len(body))}
+    sent.update(headers or {})
+    head = "".join(f"{name}: {value}\r\n" for name, value in sent.items() if value is not None)
     handler = handler_cls.__new__(handler_cls)
-    handler.rfile = rfile
-    handler.wfile = response
-    handler.headers = {"content-length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
+    handler.wfile = io.BytesIO()
+    handler.headers = http.client.parse_headers(io.BytesIO(head.encode("latin-1") + b"\r\n"))
     handler.path = path
-    handler.command = "POST"
+    handler.command = method
     handler.client_address = ("127.0.0.1", 0)
     handler.request_version = "HTTP/1.1"
     handler.server = mock.MagicMock()
+    handler.server.server_address = ("127.0.0.1", TEST_PORT)
     handler.send_response = mock.MagicMock()
     handler.send_header = mock.MagicMock()
     handler.end_headers = mock.MagicMock()
@@ -59,8 +58,16 @@ def call_post(handler_cls, path, payload):
         captured["status"] = status
         captured["payload"] = payload_
     handler.send_json = send_json
-    handler.do_POST()
+    getattr(handler, f"do_{method}")()
     return captured
+
+
+def call_post(handler_cls, path, payload, *, headers=None):
+    return call_handler(handler_cls, "POST", path, json.dumps(payload).encode("utf-8"), headers)
+
+
+def call_get(handler_cls, path, *, headers=None):
+    return call_handler(handler_cls, "GET", path, headers=headers)
 
 
 def call_mark(handler_cls, payload, *, plan_payload=None):

@@ -422,6 +422,12 @@ Leave the OpenLaser terminal window running and manually open:
 http://127.0.0.1:8765
 ```
 
+### The browser shows “Request refused”
+
+OpenLaser was opened through a network name or address, such as the
+computer's name or a `192.168…` address. It only answers its own page on this
+computer: open `http://127.0.0.1:8765` instead.
+
 ### The page says “Server connection lost”
 
 The terminal window running OpenLaser was probably closed. Start OpenLaser
@@ -533,6 +539,10 @@ For direct MOPA emission:
   refused rather than dropped.
 - The operator must type `ARM`, and the final confirmation sends a single-use
   token issued for that exact job; it expires after 60 seconds.
+- The local server answers only requests addressed to `127.0.0.1`, `localhost`
+  or `[::1]` on its own port, and refuses any POST sent by another web page.
+  This stops a malicious website from reaching the laser through DNS
+  rebinding or a cross-site request.
 - Only one OpenLaser process may drive the board at a time
   (`~/Library/Application Support/OpenLaser/board.lock` on macOS).
 - If the board stops making progress (no READY or idle within a budget derived

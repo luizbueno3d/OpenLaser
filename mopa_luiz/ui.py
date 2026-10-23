@@ -2495,11 +2495,50 @@ HTML = """<!doctype html>
 """
 
 
+# Hostnames a browser puts in Host only when its page really is on this computer.
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+
+
+def loopback_authorities(port: int) -> frozenset[str]:
+    """Host header values that address this server over loopback."""
+    names = {f"{host}:{port}" for host in LOOPBACK_HOSTS}
+    if port == 80:
+        names.update(LOOPBACK_HOSTS)  # browsers leave the default port out
+    return frozenset(names)
+
+
 class UiHandler(BaseHTTPRequestHandler):
     markcfg: Path
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+    def refused_foreign_request(self) -> bool:
+        """Answer 403 unless this request comes from OpenLaser's own page.
+
+        Listening on 127.0.0.1 keeps other computers out, not web pages. With
+        DNS rebinding a page's own hostname resolves to 127.0.0.1, so its
+        scripts can call /api/plan, read the ARM nonce and replay it to
+        /api/mark. The browser still sends that hostname in Host, and the
+        page's origin in Origin on every POST, so both must name this server.
+        """
+        port = self.server.server_address[1]
+        host = (self.headers.get("host") or "").strip().lower()
+        origin = self.headers.get("origin")
+        if host not in loopback_authorities(port):
+            reason = (
+                f"Request refused: OpenLaser only answers requests addressed to this computer (Host was {host!r}). "
+                f"Open it at http://127.0.0.1:{port}"
+            )
+        elif self.command == "POST" and origin is not None and origin.strip().lower() != f"http://{host}":
+            reason = (
+                f"Request refused: it was sent by another web page ({origin!r}). "
+                f"Only OpenLaser's own page at http://{host} may send it"
+            )
+        else:
+            return False
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": reason})
+        return True
 
     def send_json(self, status: HTTPStatus, payload: dict) -> None:
         data = json.dumps(payload, indent=2).encode("utf-8")
@@ -2510,6 +2549,8 @@ class UiHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self) -> None:
+        if self.refused_foreign_request():
+            return
         path = urlparse(self.path).path
         if path == "/":
             data = HTML.encode("utf-8")
@@ -2575,6 +2616,8 @@ class UiHandler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length) or b"{}")
 
     def do_POST(self) -> None:
+        if self.refused_foreign_request():
+            return
         path = urlparse(self.path).path
         try:
             payload = self.read_payload()
@@ -3126,6 +3169,9 @@ def serve(host: str, port: int, markcfg: Path, *, open_browser: bool = True) -> 
         ) from exc
     print(f"OpenLaser UI: {url}  (safety: 0..100% power, ARM required)")
     print("Default behavior is dry-run / red-light framing only. Mark Job needs ARM and confirmation.")
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        print(f"Only http://127.0.0.1:{port}, http://localhost:{port} and http://[::1]:{port} are answered; "
+              "requests addressed to any other name or address are refused.")
     if open_browser:
         if open_default_browser(url):
             print("Opened OpenLaser in your default browser.")
