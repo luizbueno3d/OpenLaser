@@ -25,8 +25,10 @@ classifiers = [
 # laser is found on a fresh Mac, Windows or Linux machine. It only publishes
 # wheels for these platforms; elsewhere (Windows on ARM, 32-bit Raspberry Pi)
 # requiring it would break the install, and the system libusb is used instead.
+# galvoplotter is pinned: live.py patches its controller internals
+# (_list_write, send, abort, the wait_* methods), checked against 0.2.0.
 dependencies = [
-  "galvoplotter",
+  "galvoplotter==0.2.0",
   "pyusb",
   "libusb-package; sys_platform == 'darwin' or (sys_platform == 'win32' and platform_machine != 'ARM64') or (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64'))",
 ]
