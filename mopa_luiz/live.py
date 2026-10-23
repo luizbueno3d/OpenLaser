@@ -241,6 +241,9 @@ class JobParams:
 
 def stop_controller(controller: GalvoController) -> None:
     """Release any pending board waits, then abort and disconnect."""
+    waits = getattr(controller, "_openlaser_waits", None)
+    if waits is not None and waits.trace is not None and not waits.shut_down:
+        waits.trace.event("STOP", source="stop_controller")
     stop_event = getattr(controller, "_openlaser_stop", None)
     if stop_event is not None:
         stop_event.set()
@@ -328,6 +331,10 @@ def run_hardware_job(function_name: str, *args, timeout_s: float = HARDWARE_JOB_
 
 def stop_active_hardware_jobs() -> dict[str, Any]:
     STOP_REQUESTED.set()
+    trace = UsbTrace.from_env()
+    if trace is not None:
+        trace.event("STOP", source="api")
+        trace.close()
     with ACTIVE_HARDWARE_LOCK:
         processes = list(ACTIVE_HARDWARE_PROCESSES.values())
     stopped = 0
