@@ -41,7 +41,7 @@ from .cli import (
     nearest_pulse_width,
     pulse_width_table,
 )
-from .safety import evaluate_emission
+from .safety import evaluate_emission, mark_speed_errors
 
 
 HARDWARE_JOB_TIMEOUT_S = 60.0
@@ -1140,6 +1140,10 @@ def mark_box(cfg: MarkConfig, params: JobParams, arm: bool, confirm: str) -> dic
     )
     safety.raise_if_blocked()
 
+    speed_errors = mark_speed_errors(params.mark_speed, effective_field_size(cfg))
+    if speed_errors:
+        raise PermissionError("; ".join(speed_errors))
+
     plan = build_test_box_plan(
         cfg,
         power=params.power,
@@ -1239,6 +1243,9 @@ def mark_polylines(
     )
     safety.raise_if_blocked()
     field_size = effective_field_size(cfg)
+    speed_errors = mark_speed_errors(params.mark_speed, field_size)
+    if speed_errors:
+        raise PermissionError("; ".join(speed_errors))
     job_paths = sanitize_polylines(polylines, field_size)
     controller = connect_controller(cfg, params)
     try:

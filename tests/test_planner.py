@@ -259,6 +259,29 @@ class PlanAndMarkTests(unittest.TestCase):
         self.assertEqual(mark["status"], 200, mark)
         self.assertEqual(patched.call_count, 1)
 
+    def test_layer_speed_that_encodes_to_zero_is_refused(self):
+        from mopa_luiz import live
+        from tests.fake_lmc import FakeLmcBoard, fake_board
+
+        layers = default_layers()
+        for layer in layers:
+            if layer.layer_id == "vector-engrave":
+                layer.speed_mm_s = 3.0
+        board = FakeLmcBoard()
+        # Effective field 236.68 mm (scale 1.1834): one unit is 3.61 mm/s.
+        with fake_board(board, scale=1.1834), mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
+            mark = call_mark(self.handler_cls, self._payload(layers=layers))
+            plan = call_post(self.handler_cls, "/api/plan", self._payload(layers=layers))["payload"]
+            with self.assertRaisesRegex(PermissionError, "minimum is 3.62 mm/s"):
+                live.mark_polylines(live.MarkConfig(path=Path("mem"), values={"FIELDSIZE": "200"}),
+                                    live.JobParams("", 10.0, 30.0, 200.0, 10.0, 3.0),
+                                    [[[0.0, 0.0], [1.0, 0.0]]], arm=True, confirm="ARM")
+        self.assertEqual(mark["status"].value, 400)
+        self.assertIn("minimum is 3.62 mm/s", mark["payload"]["layer_errors"]["vector-engrave"][0])
+        self.assertIn("vector-engrave", plan["layer_errors"])
+        patched.assert_not_called()
+        self.assertEqual(board.events, [], "the driver re-check refuses before any USB traffic")
+
     def test_plan_warns_when_only_frame_only_geometry(self):
         objects = [{"layer_id": "frame-only", "polylines": [[(0, 0), (5, 0)]]}]
         result = call_post(self.handler_cls, "/api/plan", self._payload(objects=objects))

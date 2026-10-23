@@ -19,6 +19,7 @@ working power via per-layer settings.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 from .cli import MarkConfig, nearest_pulse_width, pulse_width_table
 
@@ -116,6 +117,17 @@ def actual_mark_speed(speed_mm_s: float, field_size_mm: float) -> float:
     return mark_speed_units(speed_mm_s, field_size_mm) * 1000.0 * field_size_mm / 0xFFFF
 
 
+def mark_speed_errors(speed_mm_s: float, field_size_mm: float) -> list[str]:
+    """A speed below one galvo unit per ms encodes as MarkSpeed(0) (B7): refuse it."""
+    if speed_mm_s <= 0 or mark_speed_units(speed_mm_s, field_size_mm) >= 1:
+        return []
+    minimum = math.ceil(1000.0 * field_size_mm / 0xFFFF * 100.0) / 100.0
+    return [
+        f"speed {speed_mm_s:g} mm/s is below one galvo unit per ms at the {field_size_mm:.2f} mm field "
+        f"and would be sent as 0; the minimum is {minimum:.2f} mm/s"
+    ]
+
+
 def validate_layer_settings(
     *,
     operation: str,
@@ -124,6 +136,7 @@ def validate_layer_settings(
     pulse_width_ns: float,
     speed_mm_s: float,
     cfg: MarkConfig | None,
+    field_size_mm: float | None = None,
 ) -> list[str]:
     """Check a layer's parameters for sanity.
 
@@ -137,6 +150,8 @@ def validate_layer_settings(
         errors.append(f"layer power {power_percent} out of 0..100")
     if speed_mm_s <= 0:
         errors.append("layer speed must be > 0 mm/s")
+    if field_size_mm is not None:
+        errors.extend(f"layer {error}" for error in mark_speed_errors(speed_mm_s, field_size_mm))
     if cfg is not None:
         min_freq_hz = cfg.get_int("MINPWMFREQ", 1000) or 1000
         max_freq_hz = cfg.get_int("MAXPWMFREQ", 4000000) or 4000000

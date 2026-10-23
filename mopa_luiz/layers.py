@@ -129,8 +129,13 @@ def layer_from_dict(payload: dict) -> LayerSpec:
 def validate_layers(
     layers: Iterable[LayerSpec],
     cfg: MarkConfig | None,
+    field_size_mm: float | None = None,
 ) -> dict[str, list[str]]:
-    """Per-layer validation. Returns layer_id -> list of errors."""
+    """Per-layer validation. Returns layer_id -> list of errors.
+
+    `field_size_mm` is the effective galvo field; with it, speeds that would
+    encode to zero galvo units are refused.
+    """
     errors: dict[str, list[str]] = {}
     for layer in layers:
         layer_errors = validate_layer_settings(
@@ -140,6 +145,7 @@ def validate_layers(
             pulse_width_ns=layer.pulse_width_ns,
             speed_mm_s=layer.speed_mm_s,
             cfg=cfg,
+            field_size_mm=field_size_mm,
         )
         if layer.operation == RASTER_ENGRAVE and layer.output:
             if layer.raster_pitch_mm <= 0:

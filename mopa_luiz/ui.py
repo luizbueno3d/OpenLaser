@@ -2748,7 +2748,7 @@ class UiHandler(BaseHTTPRequestHandler):
                         },
                     })
                     return
-                layer_errors = validate_layers(layers, cfg)
+                layer_errors = validate_layers(layers, cfg, effective_field_size(cfg))
                 primary = next((job for job in emitting if job.polylines), None)
                 if primary is None:
                     primary_safety = evaluate_emission(
@@ -2849,7 +2849,7 @@ class UiHandler(BaseHTTPRequestHandler):
                 FRAME_LOOP.stop()
                 clear_stop_request()
                 repeat_count = repeat_count_from(live)
-                layer_errors = validate_layers(layers, cfg)
+                layer_errors = validate_layers(layers, cfg, effective_field_size(cfg))
                 if layer_errors:
                     self.send_json(HTTPStatus.BAD_REQUEST, {
                         "error": "one or more layers have invalid parameters",
