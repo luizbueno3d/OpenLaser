@@ -300,6 +300,8 @@ This path is only for the built-in JCZ/LMC JPT M7 profile.
 
 Use **Start Continuous Frame** only while positioning. Click **Stop Frame** when
 finished. Use the red **STOP ENGRAVING** button if the job must stop immediately.
+A stop pressed while the frame is still connecting to the board cancels it: the
+frame reports that it was stopped and never starts.
 
 ### Step 7B: Export a CO₂ or diode laser job
 

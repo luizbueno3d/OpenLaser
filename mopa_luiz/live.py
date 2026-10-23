@@ -1255,6 +1255,12 @@ def frame_box(cfg: MarkConfig, params: JobParams) -> dict[str, Any]:
 class FrameLoop:
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # stop() never takes _lock (start holds it while connecting, up to
+        # CONNECT_TIMEOUT_S). _stop_lock guards _controller and the stop
+        # generation, so a Stop either lands before start publishes its
+        # controller (start then refuses) or finds the controller and stops it.
+        self._stop_lock = threading.Lock()
+        self._stop_generation = 0
         self._controller: GalvoController | None = None
         self._points: list[tuple[int, int]] = []
         self._fault: str | None = None
@@ -1277,7 +1283,7 @@ class FrameLoop:
             paths_count=len(polylines or []) or 1,
         ).raise_if_blocked()
         with self._lock:
-            self.stop()
+            generation = self._halt()
             self._fault = None
             field_size = effective_field_size(cfg)
             job_paths = (
@@ -1304,8 +1310,17 @@ class FrameLoop:
                         c.light(*point)
                 return False
 
-            controller.submit(_guard_job(controller, loop_job, on_fault=lambda reason: self._on_fault(controller, reason)))
-            self._controller = controller
+            with self._stop_lock:
+                stopped = self._stop_generation != generation
+                if not stopped:
+                    controller.submit(_guard_job(controller, loop_job, on_fault=lambda reason: self._on_fault(controller, reason)))
+                    self._controller = controller
+            if stopped:
+                # A stop arrived while the board was connecting: nothing
+                # has been submitted, so close this connection and refuse.
+                self._points = []
+                stop_controller(controller)
+                raise RuntimeError("frame stopped while connecting to the board; the red-light loop was not started")
             return {
                 "ok": True,
                 "operation": "frame_loop_start",
@@ -1321,7 +1336,7 @@ class FrameLoop:
         """
 
         def stop_faulted() -> None:
-            with self._lock:
+            with self._lock, self._stop_lock:
                 if self._controller is controller:
                     self._controller = None
                     self._points = []
@@ -1333,16 +1348,28 @@ class FrameLoop:
         threading.Thread(target=stop_faulted, name="openlaser-frame-fault-stop", daemon=True).start()
 
     def stop(self) -> dict[str, Any]:
-        controller = self._controller
-        self._controller = None
-        self._points = []
-        if controller is not None:
-            stop_controller(controller)
+        self._halt()
         return {
             "ok": True,
             "operation": "frame_loop_stop",
             "emission_enabled": False,
         }
+
+    def _halt(self) -> int:
+        """Stop the running loop and cancel any start still connecting.
+
+        Returns the new stop generation, read in the same critical section,
+        so a later Stop is never mistaken for this one.
+        """
+        with self._stop_lock:
+            self._stop_generation += 1
+            generation = self._stop_generation
+            controller = self._controller
+            self._controller = None
+            self._points = []
+        if controller is not None:
+            stop_controller(controller)
+        return generation
 
     def status(self) -> dict[str, Any]:
         with self._lock:

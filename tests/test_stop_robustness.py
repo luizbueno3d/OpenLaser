@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from mopa_luiz import live
-from tests.fake_lmc import BOX10, CFG, FakeLmcBoard, fake_board, params
+from tests.fake_lmc import BOX10, CFG, DUMMY_PACKET_SHA, FakeLmcBoard, fake_board, params
 from tests.test_board_waits import call_with_deadline
 
 
@@ -132,6 +132,69 @@ class FrameLoopFaultTests(unittest.TestCase):
         self.assertTrue(old.shutdown.called)
         self.assertIsNone(loop.status()["fault"])
         self.assertTrue(loop.running)
+
+
+class SlowOpenBoard(FakeLmcBoard):
+    """A board whose USB open() blocks until the test lets it finish."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.opening = threading.Event()
+        self.release = threading.Event()
+
+    def open(self, index=0):
+        self.opening.set()
+        self.release.wait(10.0)
+        return super().open(index)
+
+
+class FrameLoopStopDuringConnectTests(unittest.TestCase):
+    def test_stop_while_start_is_connecting_wins(self):
+        board = SlowOpenBoard()
+        loop = live.FrameLoop()
+        self.addCleanup(loop.stop)  # never leave a loop running if an assertion fails
+        outcome: dict = {}
+
+        def start():
+            try:
+                outcome["result"] = loop.start(CFG, params(), BOX10)
+            except BaseException as exc:  # handed back to the test
+                outcome["error"] = exc
+
+        with fake_board(board):
+            worker = threading.Thread(target=start, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(board.opening.wait(10.0), "start never reached the board's open()")
+                stopped = loop.stop()  # Stop from another thread, mid-connect
+            finally:
+                board.release.set()
+                worker.join(15.0)
+            self.assertFalse(worker.is_alive(), "start never returned")
+            self.assertNotIn("result", outcome, "the loop started after Stop")
+            self.assertIsInstance(outcome.get("error"), RuntimeError)
+            self.assertIn("stopped while connecting", str(outcome["error"]))
+            live.BoardLock(live.BOARD_LOCK_PATH).release()  # the refused start freed the board
+            self.assertTrue(stopped["ok"])
+            self.assertFalse(loop.running)
+            self.assertEqual(loop.status()["points"], [])
+            # No red-light list: at most the abort's empty end-of-list packet.
+            self.assertEqual([e for e in board.lists() if e["n_real"]], [])
+            self.assertEqual([e for e in board.lists() if e["sha256"] != DUMMY_PACKET_SHA], [])
+            self.assertTrue(board.singles("StopExecute"))
+            self.assertEqual(board.devices, {})
+
+            # The stop is spent: the next Start runs the loop.
+            loop.start(CFG, params(), BOX10)
+            try:
+                self.assertTrue(loop.running)
+                deadline = time.monotonic() + 5.0
+                while not [e for e in board.lists() if e["n_real"]] and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue([e for e in board.lists() if e["n_real"]])
+            finally:
+                loop.stop()
+            self.assertFalse(loop.running)
 
 
 if __name__ == "__main__":
