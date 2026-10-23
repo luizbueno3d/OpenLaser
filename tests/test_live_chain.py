@@ -190,9 +190,12 @@ class UiChainSmokeTest(unittest.TestCase):
                 }
             ],
             "layers": [],
-            "live": {**LIVE, "arm": True, "confirm": "ARM"},
+            "live": {**LIVE, "confirm": "ARM"},
         }
-        status, body = self.post("/api/mark", payload)
+        status, plan = self.post("/api/plan", payload)
+        self.assertEqual(status, 200, plan)
+        armed = {**payload, "arm_nonce": plan["arm_nonce"], "live": {**payload["live"], "arm": True}}
+        status, body = self.post("/api/mark", armed)
         self.assertEqual(status, 200, body)
         self.assertTrue(body.get("ok"), body)
         passes = body.get("passes") or []

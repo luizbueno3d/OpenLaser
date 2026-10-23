@@ -63,6 +63,13 @@ def call_post(handler_cls, path, payload):
     return captured
 
 
+def call_mark(handler_cls, payload, *, plan_payload=None):
+    """Post /api/mark the way the confirm button does: with the nonce /api/plan issued."""
+    plan = call_post(handler_cls, "/api/plan", plan_payload if plan_payload is not None else payload)
+    nonce = plan["payload"].get("arm_nonce")
+    return call_post(handler_cls, "/api/mark", {**payload, "arm_nonce": nonce})
+
+
 class PlanAndMarkTests(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
@@ -126,7 +133,7 @@ class PlanAndMarkTests(unittest.TestCase):
         })
         with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
             patched.side_effect = PermissionError('emission requires arm=true and confirmation text "ARM"')
-            result = call_post(self.handler_cls, "/api/mark", payload)
+            result = call_mark(self.handler_cls, payload)
         self.assertEqual(result["status"].value, 403)
         self.assertIn("arm=true", result["payload"]["error"])
 
@@ -137,13 +144,13 @@ class PlanAndMarkTests(unittest.TestCase):
                 layer.power_percent = 100
         with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
             patched.return_value = {"ok": True}
-            result = call_post(self.handler_cls, "/api/mark", self._payload(layers=layers))
+            result = call_mark(self.handler_cls, self._payload(layers=layers))
         self.assertEqual(result["status"], 200)
 
     def test_mark_runs_per_emitting_layer(self):
         with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
             patched.return_value = {"ok": True}
-            result = call_post(self.handler_cls, "/api/mark", self._payload())
+            result = call_mark(self.handler_cls, self._payload())
             self.assertEqual(result["status"], 200)
             self.assertEqual(patched.call_count, 1)
 
@@ -158,7 +165,7 @@ class PlanAndMarkTests(unittest.TestCase):
         objects = [{"layer_id": "vector-engrave", "polylines": lines}]
         with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
             patched.return_value = {"ok": True}
-            result = call_post(self.handler_cls, "/api/mark", self._payload(objects=objects, layers=layers))
+            result = call_mark(self.handler_cls, self._payload(objects=objects, layers=layers))
         self.assertEqual(result["status"], 200)
         _, cfg, layer_params, polylines = patched.call_args.args
         estimate = live.estimate_mark_seconds(cfg, layer_params, polylines)
@@ -177,7 +184,7 @@ class PlanAndMarkTests(unittest.TestCase):
         objects = [{"layer_id": "raster", "polylines": [square]}]
         with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
             patched.return_value = {"ok": True}
-            result = call_post(self.handler_cls, "/api/mark",
+            result = call_mark(self.handler_cls,
                                self._payload(layers=layers, objects=objects))
         self.assertEqual(result["status"], 200)
         # Raster goes through a single hardware job carrying the hatch
@@ -196,7 +203,7 @@ class PlanAndMarkTests(unittest.TestCase):
         # Open path: not closed, so no hatch fill possible.
         objects = [{"layer_id": "raster", "polylines": [[(0, 0), (5, 0)]]}]
         with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
-            result = call_post(self.handler_cls, "/api/mark",
+            result = call_mark(self.handler_cls,
                                self._payload(layers=layers, objects=objects))
         self.assertEqual(result["status"], 200)
         patched.assert_not_called()
@@ -206,7 +213,7 @@ class PlanAndMarkTests(unittest.TestCase):
     def test_frame_only_objects_are_never_marked(self):
         objects = [{"layer_id": "frame-only", "polylines": [[(0, 0), (5, 0), (5, 5), (0, 0)]]}]
         with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
-            result = call_post(self.handler_cls, "/api/mark", self._payload(objects=objects))
+            result = call_mark(self.handler_cls, self._payload(objects=objects))
         self.assertEqual(result["status"].value, 400)
         self.assertIn("nothing to mark", result["payload"]["error"])
         patched.assert_not_called()
@@ -217,7 +224,7 @@ class PlanAndMarkTests(unittest.TestCase):
             if layer.layer_id == "vector-engrave":
                 layer.output = False
         with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
-            result = call_post(self.handler_cls, "/api/mark", self._payload(layers=layers))
+            result = call_mark(self.handler_cls, self._payload(layers=layers))
         self.assertEqual(result["status"].value, 400)
         patched.assert_not_called()
 
@@ -233,7 +240,7 @@ class PlanAndMarkTests(unittest.TestCase):
         self.assertFalse(plan["payload"]["safety"]["ok"])
         self.assertTrue(any("outside" in e for e in plan["payload"]["safety"]["errors"]))
         with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
-            mark = call_post(self.handler_cls, "/api/mark", self._payload(objects=objects))
+            mark = call_mark(self.handler_cls, self._payload(objects=objects))
         self.assertEqual(mark["status"].value, 400)
         patched.assert_not_called()
 
@@ -243,7 +250,7 @@ class PlanAndMarkTests(unittest.TestCase):
             {"layer_id": "vector-cut", "polylines": [[(0, 0), (150, 0)]]},
         ]
         with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
-            result = call_post(self.handler_cls, "/api/mark", self._payload(objects=objects))
+            result = call_mark(self.handler_cls, self._payload(objects=objects))
         self.assertEqual(result["status"].value, 400)
         self.assertTrue(result["payload"]["geometry_errors"])
         patched.assert_not_called()

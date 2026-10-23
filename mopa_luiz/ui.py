@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
+import secrets
+import threading
+import time
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -59,6 +63,11 @@ from .safety import actual_mark_speed, evaluate_emission, mark_speed_units
 
 
 FRAME_LOOP = FrameLoop()
+# ARM (B5): /api/plan and /api/test/preview issue a single-use nonce bound to
+# the exact job; /api/mark and /api/test/run refuse with 403 without it.
+ARM_NONCE_TTL_S = 60.0
+_ARM_NONCES: dict[str, tuple[str, float]] = {}
+_ARM_NONCES_LOCK = threading.Lock()
 LAYER_SETTINGS_PATH = Path(__file__).resolve().parent.parent / "layer_settings.json"
 WORKSPACE_PATH = Path(__file__).resolve().parent.parent / "workspace.json"
 WORKSPACE_MAX_OBJECTS = 3000
@@ -2154,7 +2163,6 @@ HTML = """<!doctype html>
         repeat_count: Math.max(1, Math.floor(Number(document.getElementById('markRepeat').value) || 1)),
         size_mm: 10,
         confirm: document.getElementById('confirm').value,
-        arm: true,
       };
     }
 
@@ -2208,8 +2216,14 @@ HTML = """<!doctype html>
       document.getElementById('modalScrim').classList.add('show');
       const confirm = document.getElementById('modalConfirm');
       const cancel = document.getElementById('modalCancel');
-      const close = () => { document.getElementById('modalScrim').classList.remove('show'); confirm.onclick = null; cancel.onclick = null; };
-      confirm.onclick = () => { close(); onConfirm(); };
+      const armField = document.getElementById('confirm');
+      const close = () => {
+        document.getElementById('modalScrim').classList.remove('show');
+        confirm.onclick = null; cancel.onclick = null;
+        armField.value = '';  // ARM is single-use: type it again for the next job
+        updateSummary();
+      };
+      confirm.onclick = () => { const armText = armField.value; close(); onConfirm(armText); };
       cancel.onclick = close;
     }
 
@@ -2240,8 +2254,9 @@ HTML = """<!doctype html>
         openModal({
           title: 'Confirm marking',
           body,
-          onConfirm: async () => {
-            try { show(await postJson('/api/mark', payload)); } catch {}
+          onConfirm: async (armText) => {
+            const armed = { ...payload, arm_nonce: preview.arm_nonce, live: { ...payload.live, confirm: armText, arm: true } };
+            try { show(await postJson('/api/mark', armed)); } catch {}
           }
         });
       } catch {}
@@ -2260,8 +2275,8 @@ HTML = """<!doctype html>
           body: `<p>Laser will emit now. Power ${preview.params.power}%, Frequency ${preview.params.frequency_khz} kHz,
                   Pulse ${preview.params.pulse_width_ns} ns, Speed ${preview.params.mark_speed} mm/s.</p>
                   <p>This is a first-burn helper for fixturing tests.</p>`,
-          onConfirm: async () => {
-            const armPayload = { ...preview.params, arm: true, confirm: document.getElementById('confirm').value, kind };
+          onConfirm: async (armText) => {
+            const armPayload = { ...preview.params, arm: true, confirm: armText, kind, arm_nonce: preview.arm_nonce };
             try { show(await postJson('/api/test/run', armPayload)); } catch {}
           }
         });
@@ -2629,6 +2644,7 @@ class UiHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {
                     "params": params,
                     "kind": kind,
+                    "arm_nonce": issue_arm_nonce({"first_burn_test": kind}),
                     "safety": {
                         # Drop the ARM-missing error from preview — UI requires ARM at run time.
                         "errors": [e for e in safety.errors if "arm=true" not in e],
@@ -2639,9 +2655,10 @@ class UiHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/test/run":
+                kind = str(payload.get("kind", "dot"))
+                consume_arm_nonce(payload.get("arm_nonce"), {"first_burn_test": kind})
                 FRAME_LOOP.stop()
                 clear_stop_request()
-                kind = str(payload.get("kind", "dot"))
                 params = first_burn_params(kind)
                 arm = bool(payload.get("arm"))
                 confirm = str(payload.get("confirm", ""))
@@ -2752,7 +2769,8 @@ class UiHandler(BaseHTTPRequestHandler):
                         frequency_khz=layer.frequency_khz,
                         pulse_width_ns=layer.pulse_width_ns,
                         intends_emission=True,
-                        arm=bool(live.get("arm")),
+                        # A preview: arm=true is sent only by the confirm button.
+                        arm=True,
                         confirm=str(live.get("confirm", "")),
                         operation=layer.operation,
                         paths_count=sum(len(job.polylines) for job in emitting),
@@ -2792,6 +2810,7 @@ class UiHandler(BaseHTTPRequestHandler):
                     # The Mark confirmation shows only these: what each layer will burn.
                     "emission_rows": emission_rows(emission_steps(emitting), cfg, effective_field_size(cfg)),
                     "repeat_count": repeat_count_from(live),
+                    "arm_nonce": issue_arm_nonce(mark_arm_material(payload)),
                     "frame_settings": {
                         "power_percent": params.power,
                         "frequency_khz": params.frequency_khz,
@@ -2825,6 +2844,7 @@ class UiHandler(BaseHTTPRequestHandler):
             if path == "/api/mark":
                 if not machine.direct_control:
                     raise ValueError("direct machine control is not enabled for this profile; export G-code instead")
+                consume_arm_nonce(payload.get("arm_nonce"), mark_arm_material(payload))
                 FRAME_LOOP.stop()
                 clear_stop_request()
                 repeat_count = repeat_count_from(live)
@@ -2910,6 +2930,45 @@ class UiHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
         except Exception as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+
+def arm_material_digest(material: object) -> str:
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def mark_arm_material(payload: dict) -> dict:
+    """Everything in a Mark request that decides what burns; the ARM fields are left out."""
+    material = {key: value for key, value in payload.items() if key != "arm_nonce"}
+    live = dict(material.get("live") or {})
+    live.pop("arm", None)
+    live.pop("confirm", None)
+    material["live"] = live
+    return material
+
+
+def issue_arm_nonce(material: object) -> str:
+    nonce = secrets.token_urlsafe(24)
+    now = time.monotonic()
+    with _ARM_NONCES_LOCK:
+        for stale in [key for key, (_, expires) in _ARM_NONCES.items() if expires < now]:
+            del _ARM_NONCES[stale]
+        _ARM_NONCES[nonce] = (arm_material_digest(material), now + ARM_NONCE_TTL_S)
+    return nonce
+
+
+def consume_arm_nonce(nonce: object, material: object) -> None:
+    """Single use: the nonce is spent by the first request that presents it."""
+    with _ARM_NONCES_LOCK:
+        entry = _ARM_NONCES.pop(str(nonce or ""), None)
+    if entry is None:
+        raise PermissionError("ARM refused: no valid confirmation for this job. Confirm it again in the dialog.")
+    digest, expires = entry
+    if time.monotonic() > expires:
+        raise PermissionError(f"ARM refused: the confirmation expired after {ARM_NONCE_TTL_S:.0f} s. Confirm again.")
+    if digest != arm_material_digest(material):
+        raise PermissionError("ARM refused: the job changed after it was confirmed. Confirm it again.")
 
 
 def job_params_from_payload(payload: dict) -> JobParams:
