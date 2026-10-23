@@ -33,6 +33,7 @@ from .layers import (
     emitting_jobs,
     framing_jobs,
     group_by_layer,
+    hidden_output_errors,
     layer_from_dict,
     validate_layers,
 )
@@ -2776,7 +2777,7 @@ class UiHandler(BaseHTTPRequestHandler):
                         paths_count=sum(len(job.polylines) for job in emitting),
                     )
                 safety_report = primary_safety.to_dict()
-                geometry_problems = emission_geometry_errors(
+                geometry_problems = hidden_output_errors(jobs) + emission_geometry_errors(
                     emission_steps(emitting), framing_polylines, effective_field_size(cfg)
                 )
                 if geometry_problems:
@@ -2854,6 +2855,11 @@ class UiHandler(BaseHTTPRequestHandler):
                         "error": "one or more layers have invalid parameters",
                         "layer_errors": layer_errors,
                     })
+                    return
+                hidden = hidden_output_errors(jobs)
+                if hidden:
+                    # Framing skips hidden layers, so they would burn unframed.
+                    self.send_json(HTTPStatus.BAD_REQUEST, {"error": " ".join(hidden)})
                     return
                 steps = emission_steps(emitting)
                 if not steps:

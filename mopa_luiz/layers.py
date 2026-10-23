@@ -187,6 +187,16 @@ def emitting_jobs(jobs: list[LayerJob]) -> list[LayerJob]:
     return [job for job in jobs if job.layer.emits_when_marking() and job.polylines]
 
 
+def hidden_output_errors(jobs: list[LayerJob]) -> list[str]:
+    """A hidden layer with Output on would burn without ever being framed (B6)."""
+    return [
+        f"Layer {job.layer.name} is hidden but Output is on. "
+        "Show the layer so the red light frames it, or turn its Output off."
+        for job in jobs
+        if not job.layer.visible and job.layer.emits_when_marking() and job.polylines
+    ]
+
+
 def framing_jobs(jobs: list[LayerJob]) -> list[LayerJob]:
     """Layers that should be included when red-light framing the workspace."""
     keep = []

@@ -228,6 +228,37 @@ class PlanAndMarkTests(unittest.TestCase):
         self.assertEqual(result["status"].value, 400)
         patched.assert_not_called()
 
+    def test_hidden_layer_with_output_on_is_refused(self):
+        layers = default_layers()
+        for layer in layers:
+            if layer.layer_id == "vector-engrave":
+                layer.visible = False
+        with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
+            mark = call_mark(self.handler_cls, self._payload(layers=layers))
+        self.assertEqual(mark["status"].value, 400)
+        self.assertIn("Layer Vector Engrave is hidden but Output is on", mark["payload"]["error"])
+        patched.assert_not_called()
+        plan = call_post(self.handler_cls, "/api/plan", self._payload(layers=layers))["payload"]
+        self.assertFalse(plan["safety"]["ok"])
+        self.assertTrue(any("hidden but Output is on" in e for e in plan["safety"]["errors"]))
+
+    def test_hidden_layer_with_output_off_or_no_objects_is_fine(self):
+        layers = default_layers()
+        for layer in layers:
+            if layer.layer_id == "vector-cut":
+                layer.visible = False  # hidden, Output on, but no objects on it
+            if layer.layer_id == "raster":
+                layer.visible, layer.output = False, False
+        objects = [
+            {"layer_id": "vector-engrave", "polylines": [[(0, 0), (5, 0)]]},
+            {"layer_id": "raster", "polylines": [[(0, 0), (5, 0), (5, 5), (0, 0)]]},
+        ]
+        with mock.patch("mopa_luiz.ui.run_hardware_job") as patched:
+            patched.return_value = {"ok": True}
+            mark = call_mark(self.handler_cls, self._payload(layers=layers, objects=objects))
+        self.assertEqual(mark["status"], 200, mark)
+        self.assertEqual(patched.call_count, 1)
+
     def test_plan_warns_when_only_frame_only_geometry(self):
         objects = [{"layer_id": "frame-only", "polylines": [[(0, 0), (5, 0)]]}]
         result = call_post(self.handler_cls, "/api/plan", self._payload(objects=objects))
