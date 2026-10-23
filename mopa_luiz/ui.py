@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
+import secrets
+import threading
+import time
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,7 +14,15 @@ from pathlib import Path
 from urllib.parse import urlparse
 import urllib.request
 
-from .cli import build_test_box_plan, config_summary, detect_report, load_markcfg, pyusb_probe
+from .cli import (
+    build_test_box_plan,
+    config_summary,
+    detect_report,
+    load_markcfg,
+    nearest_pulse_width,
+    pulse_width_table,
+    pyusb_probe,
+)
 from .geometry import bounding_box, join_lines
 from .gcode import compile_gcode
 from .importers import import_geometry
@@ -21,6 +33,7 @@ from .layers import (
     emitting_jobs,
     framing_jobs,
     group_by_layer,
+    hidden_output_errors,
     layer_from_dict,
     validate_layers,
 )
@@ -40,14 +53,23 @@ from .live import (
     save_scale_correction,
     mock_mode,
     effective_field_size,
+    nominal_field_size,
+    estimate_frame_seconds,
+    estimate_mark_seconds,
     geometry_errors,
+    hardware_job_timeout_s,
 )
 from .machines import machine_by_id, machine_catalog
 from .profile import inspect as inspect_profile_data
-from .safety import evaluate_emission
+from .safety import actual_mark_speed, evaluate_emission, mark_speed_units
 
 
 FRAME_LOOP = FrameLoop()
+# ARM (B5): /api/plan and /api/test/preview issue a single-use nonce bound to
+# the exact job; /api/mark and /api/test/run refuse with 403 without it.
+ARM_NONCE_TTL_S = 60.0
+_ARM_NONCES: dict[str, tuple[str, float]] = {}
+_ARM_NONCES_LOCK = threading.Lock()
 LAYER_SETTINGS_PATH = Path(__file__).resolve().parent.parent / "layer_settings.json"
 WORKSPACE_PATH = Path(__file__).resolve().parent.parent / "workspace.json"
 WORKSPACE_MAX_OBJECTS = 3000
@@ -586,6 +608,9 @@ HTML = """<!doctype html>
     .modal .errs { color: var(--bad); margin: 8px 0; font-size: 12px; }
     .modal .warns { color: var(--accent2); margin: 8px 0; font-size: 12px; }
     .modal .cta { display: flex; gap: 8px; margin-top: 14px; }
+    .modal .confirmRows { width: 100%; border-collapse: collapse; font-size: 12px; margin: 6px 0 10px; }
+    .modal .confirmRows th, .modal .confirmRows td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+    .modal .confirmRows th { color: var(--muted); font-weight: 600; }
     .contextMenu {
       position: fixed;
       min-width: 190px;
@@ -801,9 +826,9 @@ HTML = """<!doctype html>
             <label>Scale correction<input id="scaleCorrection" type="number" min="0.5" max="2" step="0.0001" value="1"></label>
           </div>
           <div class="info">
-            <strong>Legacy frame parameters</strong>
-            These values are only for red-light framing / planning defaults, not for normal layer marking.
-            Marking uses the selected layer's power, frequency, pulse, speed, and passes from Cuts / Layers.
+            <strong>Frame settings (red light only)</strong>
+            Used only for red-light framing; they never reach a burn. Marking always uses each
+            layer's own power, frequency, pulse, speed and passes, shown row by row in the Mark confirmation.
           </div>
           <div class="grid2">
             <label>Frame Power %<input id="power" type="number" min="0" max="100" step="1" value="100"></label>
@@ -1537,10 +1562,6 @@ HTML = """<!doctype html>
       });
       const armText = document.getElementById('confirm').value.trim().toUpperCase();
       const armOk = armText === 'ARM';
-      const power = Number(document.getElementById('power').value);
-      const freq = Number(document.getElementById('frequency').value);
-      const pulse = Number(document.getElementById('pulseWidth').value);
-      const speed = Number(document.getElementById('markSpeed').value);
       const layerErrors = layers.flatMap(l => (l._errors || []).map(e => `${l.name}: ${e}`));
       const emittingLayers = layers.filter(l => l.output && !['disabled','frame_only'].includes(l.operation));
       const rasterLayers = layers.filter(l => l.output && l.visible !== false && l.operation === 'raster_engrave');
@@ -1552,13 +1573,9 @@ HTML = """<!doctype html>
         <div class="row"><span>Paths</span><span>${polylines.length}</span></div>
         <div class="row"><span>BBox</span><span>${bbox}</span></div>
         ${rasterLayers.length ? `<div class="row"><span>Raster lines</span><span>${lastRasterLineCount}</span></div>` : ''}
-        <div class="row"><span>Power %</span><span>${power}</span></div>
-        <div class="row"><span>Freq kHz</span><span>${freq}</span></div>
-        <div class="row"><span>Pulse ns</span><span>${pulse}</span></div>
-        <div class="row"><span>Speed mm/s</span><span>${speed}</span></div>
         <div class="row ${armOk ? 'good':'bad'}"><span>ARM</span><span>${armOk ? 'typed' : 'missing'}</span></div>
         <div class="row ${willEmit ? 'bad':'good'}"><span>Will emit?</span><span>${willEmit ? 'YES' : 'no'}</span></div>
-        ${layerStats.map(s => `<div class="row"><span>· ${s.layer.name}</span><span>${s.objs} obj / ${s.paths} paths · ${s.layer.operation}</span></div>`).join('')}
+        ${layerStats.map(s => `<div class="row"><span>· ${escapeHtml(s.layer.name)}</span><span>${s.objs} obj / ${s.paths} paths · ${s.layer.operation}${s.layer.output && !['disabled','frame_only'].includes(s.layer.operation) ? ` · ${s.layer.power_percent}% ${s.layer.frequency_khz} kHz ${s.layer.pulse_width_ns} ns ${s.layer.speed_mm_s} mm/s` : ''}</span></div>`).join('')}
         ${layerErrors.length ? `<div class="row bad"><span>Layer errors</span><span>${layerErrors.length}</span></div>` : ''}
       `;
       document.getElementById('mark').disabled =
@@ -2148,7 +2165,6 @@ HTML = """<!doctype html>
         repeat_count: Math.max(1, Math.floor(Number(document.getElementById('markRepeat').value) || 1)),
         size_mm: 10,
         confirm: document.getElementById('confirm').value,
-        arm: true,
       };
     }
 
@@ -2192,14 +2208,24 @@ HTML = """<!doctype html>
       } catch (e) { show(e); }
     });
 
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+    }
+
     function openModal({ title, body, onConfirm }) {
       document.getElementById('modalTitle').textContent = title;
       document.getElementById('modalBody').innerHTML = body;
       document.getElementById('modalScrim').classList.add('show');
       const confirm = document.getElementById('modalConfirm');
       const cancel = document.getElementById('modalCancel');
-      const close = () => { document.getElementById('modalScrim').classList.remove('show'); confirm.onclick = null; cancel.onclick = null; };
-      confirm.onclick = () => { close(); onConfirm(); };
+      const armField = document.getElementById('confirm');
+      const close = () => {
+        document.getElementById('modalScrim').classList.remove('show');
+        confirm.onclick = null; cancel.onclick = null;
+        armField.value = '';  // ARM is single-use: type it again for the next job
+        updateSummary();
+      };
+      confirm.onclick = () => { const armText = armField.value; close(); onConfirm(armText); };
       cancel.onclick = close;
     }
 
@@ -2207,26 +2233,32 @@ HTML = """<!doctype html>
       const payload = buildJobPayload();
       try {
         const preview = await postJson('/api/plan', payload);
-        const params = payload.live;
         const selectedOnly = document.getElementById('selectedOnly').checked;
         const errs = (preview.safety && preview.safety.errors) || [];
         const warns = (preview.safety && preview.safety.warnings) || [];
         if (errs.length) { show({ refused: errs }); return; }
+        // Only the server's per-layer rows: the values each layer will actually burn with.
+        const rows = preview.emission_rows || [];
+        const rowHtml = rows.map(r => `<tr>
+            <td>${escapeHtml(r.name)}</td><td>${r.power_percent}%</td><td>${r.frequency_khz} kHz</td>
+            <td>${r.pulse_width_ns} ns</td><td>${Number(r.actual_speed_mm_s).toFixed(2)} mm/s</td>
+            <td>${r.passes}×</td><td>${r.path_count}</td></tr>`).join('');
         const body = `
-          <p>Laser will emit now. Power ${params.power}%,
-          Frequency ${params.frequency_khz} kHz,
-          Pulse ${params.pulse_width_ns} ns,
-          Speed ${params.mark_speed} mm/s.</p>
-          <p>${preview.emitting_paths || 0} path(s) across ${preview.emitting_layers || 0} layer(s).
-          Bounding box ${preview.bbox ? preview.bbox.width.toFixed(2) + ' × ' + preview.bbox.height.toFixed(2) + ' mm' : '—'}.</p>
-          <p>Scope: ${selectedOnly ? 'selected objects only' : 'all objects'}. Repeat: ${params.repeat_count}×.</p>
-          ${warns.length ? `<div class="warns">${warns.join('<br>')}</div>` : ''}
+          <p>Laser will emit now, with each layer's own settings:</p>
+          <table class="confirmRows">
+            <thead><tr><th>Layer</th><th>Power</th><th>Freq</th><th>Pulse</th><th>Speed (actual)</th><th>Passes</th><th>Paths</th></tr></thead>
+            <tbody>${rowHtml}</tbody>
+          </table>
+          <p>Repeat: ${preview.repeat_count}×. Bounding box ${preview.bbox ? preview.bbox.width.toFixed(2) + ' × ' + preview.bbox.height.toFixed(2) + ' mm' : '—'}.
+          Scope: ${selectedOnly ? 'selected objects only' : 'all objects'}.</p>
+          ${warns.length ? `<div class="warns">${warns.map(escapeHtml).join('<br>')}</div>` : ''}
         `;
         openModal({
           title: 'Confirm marking',
           body,
-          onConfirm: async () => {
-            try { show(await postJson('/api/mark', payload)); } catch {}
+          onConfirm: async (armText) => {
+            const armed = { ...payload, arm_nonce: preview.arm_nonce, live: { ...payload.live, confirm: armText, arm: true } };
+            try { show(await postJson('/api/mark', armed)); } catch {}
           }
         });
       } catch {}
@@ -2245,8 +2277,8 @@ HTML = """<!doctype html>
           body: `<p>Laser will emit now. Power ${preview.params.power}%, Frequency ${preview.params.frequency_khz} kHz,
                   Pulse ${preview.params.pulse_width_ns} ns, Speed ${preview.params.mark_speed} mm/s.</p>
                   <p>This is a first-burn helper for fixturing tests.</p>`,
-          onConfirm: async () => {
-            const armPayload = { ...preview.params, arm: true, confirm: document.getElementById('confirm').value, kind };
+          onConfirm: async (armText) => {
+            const armPayload = { ...preview.params, arm: true, confirm: armText, kind, arm_nonce: preview.arm_nonce };
             try { show(await postJson('/api/test/run', armPayload)); } catch {}
           }
         });
@@ -2314,10 +2346,13 @@ HTML = """<!doctype html>
     function applyFieldCalibration(nominalMm, correction) {
       if (Number.isFinite(nominalMm) && nominalMm > 0) fieldNominalMm = nominalMm;
       const factor = Number.isFinite(correction) && correction > 0 ? correction : 1;
-      FIELD_W_MM = fieldNominalMm * factor;
-      FIELD_H_MM = fieldNominalMm * factor;
+      // The work area the server enforces: the rated lens field, or the
+      // galvo's reach when the calibration makes that smaller.
+      const reach = fieldNominalMm * factor;
+      FIELD_W_MM = Math.min(reach, fieldNominalMm);
+      FIELD_H_MM = FIELD_W_MM;
       const chip = document.getElementById('fieldChip');
-      if (chip) chip.textContent = `Field ${FIELD_W_MM.toFixed(1)} × ${FIELD_H_MM.toFixed(1)} mm`;
+      if (chip) chip.textContent = `Field ${FIELD_W_MM.toFixed(1)} × ${FIELD_H_MM.toFixed(1)} mm (galvo reach ${reach.toFixed(1)})`;
     }
     function applyMachine(machine) {
       activeMachine = machine;
@@ -2614,6 +2649,7 @@ class UiHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {
                     "params": params,
                     "kind": kind,
+                    "arm_nonce": issue_arm_nonce({"first_burn_test": kind}),
                     "safety": {
                         # Drop the ARM-missing error from preview — UI requires ARM at run time.
                         "errors": [e for e in safety.errors if "arm=true" not in e],
@@ -2624,29 +2660,32 @@ class UiHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/test/run":
+                kind = str(payload.get("kind", "dot"))
+                consume_arm_nonce(payload.get("arm_nonce"), {"first_burn_test": kind})
                 FRAME_LOOP.stop()
                 clear_stop_request()
-                kind = str(payload.get("kind", "dot"))
                 params = first_burn_params(kind)
                 arm = bool(payload.get("arm"))
                 confirm = str(payload.get("confirm", ""))
                 polylines = first_burn_polylines(kind)
+                test_params = JobParams(
+                    text="",
+                    power=params["power"],
+                    frequency_khz=params["frequency_khz"],
+                    pulse_width_ns=params["pulse_width_ns"],
+                    size_mm=10.0,
+                    mark_speed=params["mark_speed"],
+                )
                 self.send_json(
                     HTTPStatus.OK,
                     run_hardware_job(
                         "mark_polylines",
                         cfg,
-                        JobParams(
-                            text="",
-                            power=params["power"],
-                            frequency_khz=params["frequency_khz"],
-                            pulse_width_ns=params["pulse_width_ns"],
-                            size_mm=10.0,
-                            mark_speed=params["mark_speed"],
-                        ),
+                        test_params,
                         polylines,
                         arm=arm,
                         confirm=confirm,
+                        timeout_s=hardware_job_timeout_s(estimate_mark_seconds(cfg, test_params, polylines)),
                     ),
                 )
                 return
@@ -2713,7 +2752,7 @@ class UiHandler(BaseHTTPRequestHandler):
                         },
                     })
                     return
-                layer_errors = validate_layers(layers, cfg)
+                layer_errors = validate_layers(layers, cfg, effective_field_size(cfg))
                 primary = next((job for job in emitting if job.polylines), None)
                 if primary is None:
                     primary_safety = evaluate_emission(
@@ -2735,14 +2774,15 @@ class UiHandler(BaseHTTPRequestHandler):
                         frequency_khz=layer.frequency_khz,
                         pulse_width_ns=layer.pulse_width_ns,
                         intends_emission=True,
-                        arm=bool(live.get("arm")),
+                        # A preview: arm=true is sent only by the confirm button.
+                        arm=True,
                         confirm=str(live.get("confirm", "")),
                         operation=layer.operation,
                         paths_count=sum(len(job.polylines) for job in emitting),
                     )
                 safety_report = primary_safety.to_dict()
-                geometry_problems = emission_geometry_errors(
-                    emission_steps(emitting), framing_polylines, effective_field_size(cfg)
+                geometry_problems = hidden_output_errors(jobs) + emission_geometry_errors(
+                    emission_steps(emitting), framing_polylines, effective_field_size(cfg), nominal_field_size(cfg)
                 )
                 if geometry_problems:
                     safety_report["errors"] = list(safety_report["errors"]) + geometry_problems
@@ -2772,6 +2812,10 @@ class UiHandler(BaseHTTPRequestHandler):
                     ],
                     "layer_errors": layer_errors,
                     "safety": safety_report,
+                    # The Mark confirmation shows only these: what each layer will burn.
+                    "emission_rows": emission_rows(emission_steps(emitting), cfg, effective_field_size(cfg)),
+                    "repeat_count": repeat_count_from(live),
+                    "arm_nonce": issue_arm_nonce(mark_arm_material(payload)),
                     "frame_settings": {
                         "power_percent": params.power,
                         "frequency_khz": params.frequency_khz,
@@ -2787,7 +2831,10 @@ class UiHandler(BaseHTTPRequestHandler):
                 FRAME_LOOP.stop()
                 clear_stop_request()
                 if framing_polylines:
-                    self.send_json(HTTPStatus.OK, run_hardware_job("frame_polylines", cfg, params, framing_polylines))
+                    self.send_json(HTTPStatus.OK, run_hardware_job(
+                        "frame_polylines", cfg, params, framing_polylines,
+                        timeout_s=hardware_job_timeout_s(estimate_frame_seconds(cfg, framing_polylines)),
+                    ))
                 else:
                     self.send_json(HTTPStatus.OK, run_hardware_job("frame_box", cfg, params))
                 return
@@ -2802,15 +2849,21 @@ class UiHandler(BaseHTTPRequestHandler):
             if path == "/api/mark":
                 if not machine.direct_control:
                     raise ValueError("direct machine control is not enabled for this profile; export G-code instead")
+                consume_arm_nonce(payload.get("arm_nonce"), mark_arm_material(payload))
                 FRAME_LOOP.stop()
                 clear_stop_request()
-                repeat_count = max(1, min(999, int(live.get("repeat_count", 1) or 1)))
-                layer_errors = validate_layers(layers, cfg)
+                repeat_count = repeat_count_from(live)
+                layer_errors = validate_layers(layers, cfg, effective_field_size(cfg))
                 if layer_errors:
                     self.send_json(HTTPStatus.BAD_REQUEST, {
                         "error": "one or more layers have invalid parameters",
                         "layer_errors": layer_errors,
                     })
+                    return
+                hidden = hidden_output_errors(jobs)
+                if hidden:
+                    # Framing skips hidden layers, so they would burn unframed.
+                    self.send_json(HTTPStatus.BAD_REQUEST, {"error": " ".join(hidden)})
                     return
                 steps = emission_steps(emitting)
                 if not steps:
@@ -2822,7 +2875,9 @@ class UiHandler(BaseHTTPRequestHandler):
                     return
                 # Validate the whole job before the first layer burns, so a bad
                 # later layer cannot leave a half-marked part.
-                geometry_problems = emission_geometry_errors(steps, [], effective_field_size(cfg))
+                geometry_problems = emission_geometry_errors(
+                    steps, [], effective_field_size(cfg), nominal_field_size(cfg)
+                )
                 if geometry_problems:
                     self.send_json(HTTPStatus.BAD_REQUEST, {
                         "error": "job geometry cannot be marked as planned",
@@ -2867,7 +2922,9 @@ class UiHandler(BaseHTTPRequestHandler):
                                 arm=bool(live.get("arm")),
                                 confirm=str(live.get("confirm", "")),
                                 operation=layer.operation,
-                                timeout_s=600.0,
+                                timeout_s=hardware_job_timeout_s(
+                                    estimate_mark_seconds(cfg, layer_params, step["polylines"])
+                                ),
                             ))
                             results[-1].update({"repeat": repeat_index + 1})
                             if raster_result is not None:
@@ -2887,6 +2944,45 @@ class UiHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
 
+def arm_material_digest(material: object) -> str:
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def mark_arm_material(payload: dict) -> dict:
+    """Everything in a Mark request that decides what burns; the ARM fields are left out."""
+    material = {key: value for key, value in payload.items() if key != "arm_nonce"}
+    live = dict(material.get("live") or {})
+    live.pop("arm", None)
+    live.pop("confirm", None)
+    material["live"] = live
+    return material
+
+
+def issue_arm_nonce(material: object) -> str:
+    nonce = secrets.token_urlsafe(24)
+    now = time.monotonic()
+    with _ARM_NONCES_LOCK:
+        for stale in [key for key, (_, expires) in _ARM_NONCES.items() if expires < now]:
+            del _ARM_NONCES[stale]
+        _ARM_NONCES[nonce] = (arm_material_digest(material), now + ARM_NONCE_TTL_S)
+    return nonce
+
+
+def consume_arm_nonce(nonce: object, material: object) -> None:
+    """Single use: the nonce is spent by the first request that presents it."""
+    with _ARM_NONCES_LOCK:
+        entry = _ARM_NONCES.pop(str(nonce or ""), None)
+    if entry is None:
+        raise PermissionError("ARM refused: no valid confirmation for this job. Confirm it again in the dialog.")
+    digest, expires = entry
+    if time.monotonic() > expires:
+        raise PermissionError(f"ARM refused: the confirmation expired after {ARM_NONCE_TTL_S:.0f} s. Confirm again.")
+    if digest != arm_material_digest(material):
+        raise PermissionError("ARM refused: the job changed after it was confirmed. Confirm it again.")
+
+
 def job_params_from_payload(payload: dict) -> JobParams:
     return JobParams(
         text=str(payload.get("text", "")),
@@ -2896,6 +2992,32 @@ def job_params_from_payload(payload: dict) -> JobParams:
         size_mm=float(payload.get("size_mm", 10)),
         mark_speed=float(payload.get("mark_speed", 1000)),
     )
+
+
+def repeat_count_from(live: dict) -> int:
+    return max(1, min(999, int(live.get("repeat_count", 1) or 1)))
+
+
+def emission_rows(steps: list[dict], cfg, field_size_mm: float) -> list[dict]:
+    """One row per emitting layer with the values the board will actually get."""
+    table = pulse_width_table(cfg)
+    rows = []
+    for step in steps:
+        layer = step["job"].layer
+        rows.append({
+            "layer_id": layer.layer_id,
+            "name": layer.name,
+            "operation": layer.operation,
+            "power_percent": layer.power_percent,
+            "frequency_khz": layer.frequency_khz,
+            "pulse_width_ns": nearest_pulse_width(layer.pulse_width_ns, table),
+            "speed_mm_s": layer.speed_mm_s,
+            "actual_speed_mm_s": round(actual_mark_speed(layer.speed_mm_s, field_size_mm), 3),
+            "speed_units": mark_speed_units(layer.speed_mm_s, field_size_mm),
+            "passes": max(1, layer.passes),
+            "path_count": len(step["polylines"]),
+        })
+    return rows
 
 
 def emission_steps(emitting: list) -> list[dict]:
@@ -2923,15 +3045,19 @@ def emission_steps(emitting: list) -> list[dict]:
     return steps
 
 
-def emission_geometry_errors(steps: list[dict], framing_polylines: list, field_size_mm: float) -> list[str]:
+def emission_geometry_errors(
+    steps: list[dict], framing_polylines: list, field_size_mm: float, rated_field_mm: float | None = None
+) -> list[str]:
     errors = [
         f"Layer {step['job'].layer.name}: {error}"
         for step in steps
         if step["polylines"]
-        for error in geometry_errors(step["polylines"], field_size_mm)
+        for error in geometry_errors(step["polylines"], field_size_mm, rated_field_mm)
     ]
     if not errors and framing_polylines:
-        errors = [f"Framing: {error}" for error in geometry_errors(framing_polylines, field_size_mm)]
+        errors = [
+            f"Framing: {error}" for error in geometry_errors(framing_polylines, field_size_mm, rated_field_mm)
+        ]
     return errors
 
 

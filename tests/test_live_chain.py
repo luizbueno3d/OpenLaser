@@ -73,7 +73,14 @@ class StubHangingController:
         self._usb_log = kwargs.get("usb_log") or (lambda message: None)
         self.mock = kwargs.get("mock", False)
         self._sending = True
+        self._spooler_thread = None
         self.abort_requested = False
+
+    def _list_write(self, *args):
+        pass
+
+    def send(self, data, read=True):
+        return None
 
     def connect_if_needed(self):
         self._usb_log("Attempting to claim interface.")
@@ -183,9 +190,12 @@ class UiChainSmokeTest(unittest.TestCase):
                 }
             ],
             "layers": [],
-            "live": {**LIVE, "arm": True, "confirm": "ARM"},
+            "live": {**LIVE, "confirm": "ARM"},
         }
-        status, body = self.post("/api/mark", payload)
+        status, plan = self.post("/api/plan", payload)
+        self.assertEqual(status, 200, plan)
+        armed = {**payload, "arm_nonce": plan["arm_nonce"], "live": {**payload["live"], "arm": True}}
+        status, body = self.post("/api/mark", armed)
         self.assertEqual(status, 200, body)
         self.assertTrue(body.get("ok"), body)
         passes = body.get("passes") or []
