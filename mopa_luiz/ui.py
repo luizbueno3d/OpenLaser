@@ -53,6 +53,7 @@ from .live import (
     save_scale_correction,
     mock_mode,
     effective_field_size,
+    nominal_field_size,
     estimate_frame_seconds,
     estimate_mark_seconds,
     geometry_errors,
@@ -2345,10 +2346,13 @@ HTML = """<!doctype html>
     function applyFieldCalibration(nominalMm, correction) {
       if (Number.isFinite(nominalMm) && nominalMm > 0) fieldNominalMm = nominalMm;
       const factor = Number.isFinite(correction) && correction > 0 ? correction : 1;
-      FIELD_W_MM = fieldNominalMm * factor;
-      FIELD_H_MM = fieldNominalMm * factor;
+      // The work area the server enforces: the rated lens field, or the
+      // galvo's reach when the calibration makes that smaller.
+      const reach = fieldNominalMm * factor;
+      FIELD_W_MM = Math.min(reach, fieldNominalMm);
+      FIELD_H_MM = FIELD_W_MM;
       const chip = document.getElementById('fieldChip');
-      if (chip) chip.textContent = `Field ${FIELD_W_MM.toFixed(1)} × ${FIELD_H_MM.toFixed(1)} mm`;
+      if (chip) chip.textContent = `Field ${FIELD_W_MM.toFixed(1)} × ${FIELD_H_MM.toFixed(1)} mm (galvo reach ${reach.toFixed(1)})`;
     }
     function applyMachine(machine) {
       activeMachine = machine;
@@ -2778,7 +2782,7 @@ class UiHandler(BaseHTTPRequestHandler):
                     )
                 safety_report = primary_safety.to_dict()
                 geometry_problems = hidden_output_errors(jobs) + emission_geometry_errors(
-                    emission_steps(emitting), framing_polylines, effective_field_size(cfg)
+                    emission_steps(emitting), framing_polylines, effective_field_size(cfg), nominal_field_size(cfg)
                 )
                 if geometry_problems:
                     safety_report["errors"] = list(safety_report["errors"]) + geometry_problems
@@ -2871,7 +2875,9 @@ class UiHandler(BaseHTTPRequestHandler):
                     return
                 # Validate the whole job before the first layer burns, so a bad
                 # later layer cannot leave a half-marked part.
-                geometry_problems = emission_geometry_errors(steps, [], effective_field_size(cfg))
+                geometry_problems = emission_geometry_errors(
+                    steps, [], effective_field_size(cfg), nominal_field_size(cfg)
+                )
                 if geometry_problems:
                     self.send_json(HTTPStatus.BAD_REQUEST, {
                         "error": "job geometry cannot be marked as planned",
@@ -3039,15 +3045,19 @@ def emission_steps(emitting: list) -> list[dict]:
     return steps
 
 
-def emission_geometry_errors(steps: list[dict], framing_polylines: list, field_size_mm: float) -> list[str]:
+def emission_geometry_errors(
+    steps: list[dict], framing_polylines: list, field_size_mm: float, rated_field_mm: float | None = None
+) -> list[str]:
     errors = [
         f"Layer {step['job'].layer.name}: {error}"
         for step in steps
         if step["polylines"]
-        for error in geometry_errors(step["polylines"], field_size_mm)
+        for error in geometry_errors(step["polylines"], field_size_mm, rated_field_mm)
     ]
     if not errors and framing_polylines:
-        errors = [f"Framing: {error}" for error in geometry_errors(framing_polylines, field_size_mm)]
+        errors = [
+            f"Framing: {error}" for error in geometry_errors(framing_polylines, field_size_mm, rated_field_mm)
+        ]
     return errors
 
 

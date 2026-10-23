@@ -94,10 +94,20 @@ def save_scale_correction(value: object) -> float:
     return number
 
 
+def nominal_field_size(cfg: MarkConfig) -> float:
+    """The lens's rated field from the machine profile (FIELDSIZE), never calibrated."""
+    return cfg.get_float("FIELDSIZE", 200.0) or 200.0
+
+
 def effective_field_size(cfg: MarkConfig) -> float:
     """Field size used for every mm<->galvo conversion: nominal x calibration."""
-    base = cfg.get_float("FIELDSIZE", 200.0) or 200.0
-    return base * load_scale_correction()
+    return nominal_field_size(cfg) * load_scale_correction()
+
+
+def work_area_size(cfg: MarkConfig) -> float:
+    """Side of the square a job may use (B10): the rated lens field, or the
+    galvo's reach when the calibration makes that smaller."""
+    return min(effective_field_size(cfg), nominal_field_size(cfg))
 
 FONT_5X7 = {
     " ": ("00000", "00000", "00000", "00000", "00000", "00000", "00000"),
@@ -280,14 +290,20 @@ MAX_JOB_POINTS = 20000
 FIELD_EDGE_TOLERANCE_MM = 1e-6
 
 
-def geometry_errors(polylines: list[list[list[float]]], field_size_mm: float) -> list[str]:
+def geometry_errors(
+    polylines: list[list[list[float]]], field_size_mm: float, rated_field_mm: float | None = None
+) -> list[str]:
     """Reasons this geometry cannot be sent to the galvo as-is; empty when OK.
 
     The galvo must burn exactly what was planned, so out-of-field points and
-    oversized jobs are refused rather than clamped or truncated.
+    oversized jobs are refused rather than clamped or truncated. With
+    `rated_field_mm`, points must also lie inside the lens's rated field:
+    a calibration above 1 lets the galvo reach past it, but the lens is not
+    rated there.
     """
     errors: list[str] = []
-    limit = field_size_mm / 2.0 + FIELD_EDGE_TOLERANCE_MM
+    work_mm = field_size_mm if rated_field_mm is None else min(field_size_mm, rated_field_mm)
+    limit = work_mm / 2.0 + FIELD_EDGE_TOLERANCE_MM
     if len(polylines) > MAX_JOB_PATHS:
         errors.append(
             f"job has {len(polylines)} paths; the limit per layer pass is {MAX_JOB_PATHS}. "
@@ -316,8 +332,15 @@ def geometry_errors(polylines: list[list[list[float]]], field_size_mm: float) ->
             "Split the job, or simplify the artwork."
         )
     if first_outside is not None:
+        if rated_field_mm is None:
+            area = f"the {field_size_mm:.2f} mm galvo field"
+        else:
+            area = (
+                f"the {work_mm:.2f} mm work area (lens rated field {rated_field_mm:.2f} mm, "
+                f"calibrated galvo reach {field_size_mm:.2f} mm)"
+            )
         errors.append(
-            f"{outside} point(s) are outside the {field_size_mm:.2f} mm galvo field "
+            f"{outside} point(s) are outside {area} "
             f"(first at {first_outside[0]:.2f}, {first_outside[1]:.2f} mm). "
             "Move or scale the artwork inside the field."
         )
@@ -347,8 +370,10 @@ def frame_once_repeats(polylines: list[list[list[float]]], point_count: int) -> 
     return max(1, min(by_time, by_size, 500))
 
 
-def sanitize_polylines(polylines: list[list[list[float]]], field_size_mm: float) -> list[list[tuple[int, int]]]:
-    errors = geometry_errors(polylines, field_size_mm)
+def sanitize_polylines(
+    polylines: list[list[list[float]]], field_size_mm: float, rated_field_mm: float | None = None
+) -> list[list[tuple[int, int]]]:
+    errors = geometry_errors(polylines, field_size_mm, rated_field_mm)
     if errors:
         raise ValueError(" ".join(errors))
     clean: list[list[tuple[int, int]]] = []
@@ -359,6 +384,19 @@ def sanitize_polylines(polylines: list[list[list[float]]], field_size_mm: float)
     if not clean:
         raise ValueError("no markable geometry in job")
     return clean
+
+
+def box_polyline_mm(size_mm: float) -> list[list[float]]:
+    half = size_mm / 2.0
+    return [[-half, -half], [half, -half], [half, half], [-half, half], [-half, -half]]
+
+
+def checked_box_points(cfg: MarkConfig, size_mm: float) -> list[tuple[int, int]]:
+    """The test box in galvo units, refused (not clamped) if it leaves the work area."""
+    errors = geometry_errors([box_polyline_mm(size_mm)], effective_field_size(cfg), nominal_field_size(cfg))
+    if errors:
+        raise ValueError(" ".join(errors))
+    return box_points(size_mm, effective_field_size(cfg))
 
 
 def box_points(size_mm: float, field_size_mm: float) -> list[tuple[int, int]]:
@@ -1007,8 +1045,7 @@ def frame_box(cfg: MarkConfig, params: JobParams) -> dict[str, Any]:
         operation="frame_only",
         paths_count=1,
     ).raise_if_blocked()
-    field_size = effective_field_size(cfg)
-    points = box_points(params.size_mm, field_size)
+    points = checked_box_points(cfg, params.size_mm)
     controller = connect_controller(cfg, params)
     try:
         def job(c: GalvoController) -> bool:
@@ -1059,7 +1096,11 @@ class FrameLoop:
             self.stop()
             self._fault = None
             field_size = effective_field_size(cfg)
-            job_paths = sanitize_polylines(polylines, field_size) if polylines else [box_points(params.size_mm, field_size)]
+            job_paths = (
+                sanitize_polylines(polylines, field_size, nominal_field_size(cfg))
+                if polylines
+                else [checked_box_points(cfg, params.size_mm)]
+            )
             self._points = [pt for path in job_paths for pt in path]
             controller = connect_controller(cfg, params)
 
@@ -1153,7 +1194,7 @@ def mark_box(cfg: MarkConfig, params: JobParams, arm: bool, confirm: str) -> dic
         arm=True,
     )
     field_size = effective_field_size(cfg)
-    points = box_points(params.size_mm, field_size)
+    points = checked_box_points(cfg, params.size_mm)
     controller = connect_controller(cfg, params)
     try:
         def job(c: GalvoController) -> bool:
@@ -1194,7 +1235,7 @@ def frame_polylines(cfg: MarkConfig, params: JobParams, polylines: list[list[lis
         paths_count=len(polylines or []),
     ).raise_if_blocked()
     field_size = effective_field_size(cfg)
-    job_paths = sanitize_polylines(polylines, field_size)
+    job_paths = sanitize_polylines(polylines, field_size, nominal_field_size(cfg))
     repeats = frame_once_repeats(polylines, sum(len(path) for path in job_paths))
     controller = connect_controller(cfg, params)
     try:
@@ -1246,7 +1287,7 @@ def mark_polylines(
     speed_errors = mark_speed_errors(params.mark_speed, field_size)
     if speed_errors:
         raise PermissionError("; ".join(speed_errors))
-    job_paths = sanitize_polylines(polylines, field_size)
+    job_paths = sanitize_polylines(polylines, field_size, nominal_field_size(cfg))
     controller = connect_controller(cfg, params)
     try:
         def job(c: GalvoController) -> bool:
