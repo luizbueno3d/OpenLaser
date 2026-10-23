@@ -129,8 +129,13 @@ def layer_from_dict(payload: dict) -> LayerSpec:
 def validate_layers(
     layers: Iterable[LayerSpec],
     cfg: MarkConfig | None,
+    field_size_mm: float | None = None,
 ) -> dict[str, list[str]]:
-    """Per-layer validation. Returns layer_id -> list of errors."""
+    """Per-layer validation. Returns layer_id -> list of errors.
+
+    `field_size_mm` is the effective galvo field; with it, speeds that would
+    encode to zero galvo units are refused.
+    """
     errors: dict[str, list[str]] = {}
     for layer in layers:
         layer_errors = validate_layer_settings(
@@ -140,6 +145,7 @@ def validate_layers(
             pulse_width_ns=layer.pulse_width_ns,
             speed_mm_s=layer.speed_mm_s,
             cfg=cfg,
+            field_size_mm=field_size_mm,
         )
         if layer.operation == RASTER_ENGRAVE and layer.output:
             if layer.raster_pitch_mm <= 0:
@@ -167,17 +173,31 @@ def group_by_layer(
 
     `objects` is a list of dicts with at least `layer_id` and `polylines`
     (already transformed into mm world coordinates by the caller).
-    Objects whose `layer_id` does not match any layer are dropped silently.
+    An object on a layer that does not exist (B8), or a point that is not
+    exactly (x, y) (B9), is refused with ValueError rather than dropped.
     """
     by_id = {layer.layer_id: layer for layer in layers}
     buckets: dict[str, list[list[tuple[float, float]]]] = {layer.layer_id: [] for layer in layers}
-    for obj in objects:
+    for index, obj in enumerate(objects):
+        name = str(obj.get("name") or f"Object {index + 1}")
         layer_id = str(obj.get("layer_id") or "")
         if layer_id not in by_id:
-            continue
+            raise ValueError(
+                f"{name} is on layer '{layer_id}', which does not exist, so it would never be "
+                "framed or marked. Move it to a layer, then plan again."
+            )
         polylines = obj.get("polylines") or []
         for poly in polylines:
-            cleaned = [(float(x), float(y)) for x, y in poly if len(poly) >= 2]
+            cleaned = []
+            for point in poly:
+                try:
+                    size = len(point)
+                except TypeError:
+                    size = None
+                if size != 2:
+                    detail = "a malformed point" if size is None else f"a point with {size} coordinate(s)"
+                    raise ValueError(f"{name} has {detail}; only 2-D (x, y) points can be framed or marked.")
+                cleaned.append((float(point[0]), float(point[1])))
             if len(cleaned) >= 2:
                 buckets[layer_id].append(cleaned)
     return [LayerJob(layer=by_id[lid], polylines=buckets[lid]) for lid in by_id]
@@ -185,6 +205,16 @@ def group_by_layer(
 
 def emitting_jobs(jobs: list[LayerJob]) -> list[LayerJob]:
     return [job for job in jobs if job.layer.emits_when_marking() and job.polylines]
+
+
+def hidden_output_errors(jobs: list[LayerJob]) -> list[str]:
+    """A hidden layer with Output on would burn without ever being framed (B6)."""
+    return [
+        f"Layer {job.layer.name} is hidden but Output is on. "
+        "Show the layer so the red light frames it, or turn its Output off."
+        for job in jobs
+        if not job.layer.visible and job.layer.emits_when_marking() and job.polylines
+    ]
 
 
 def framing_jobs(jobs: list[LayerJob]) -> list[LayerJob]:

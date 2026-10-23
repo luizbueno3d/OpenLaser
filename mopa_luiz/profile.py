@@ -32,8 +32,9 @@ class ProfileField:
 KNOWN_FIELDS: tuple[ProfileField, ...] = (
     ProfileField("FIELDSIZE", "Galvo field size (mm)", True,
                  ("live.connect_controller", "live.sanitize_polylines",
-                  "ui.config_summary"),
-                 notes="Drives mm<->galvo unit conversion."),
+                  "live.work_area_size", "ui.config_summary"),
+                 notes="Drives mm<->galvo unit conversion (x scale correction) and, uncorrected, "
+                       "bounds the work area."),
     ProfileField("MINPWMFREQ", "Min PWM/Q-switch frequency (Hz)", True,
                  ("safety.evaluate_emission", "cli.build_test_box_plan")),
     ProfileField("MAXPWMFREQ", "Max PWM/Q-switch frequency (Hz)", True,

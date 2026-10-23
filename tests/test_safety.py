@@ -5,6 +5,7 @@ from unittest import mock
 from mopa_luiz.cli import JPT_M7_PULSE_WIDTHS_NS, MarkConfig, pulse_width_table
 from mopa_luiz.safety import (
     evaluate_emission,
+    mark_speed_errors,
     validate_layer_settings,
 )
 
@@ -199,6 +200,36 @@ class ProfilePulseTableTests(unittest.TestCase):
             paths_count=0,
         )
         self.assertFalse(blocked.ok)
+
+
+class ZeroSpeedTests(unittest.TestCase):
+    """B7: a speed under one galvo unit per ms would be sent as MarkSpeed(0)."""
+
+    def layer(self, speed, field_size_mm):
+        return validate_layer_settings(
+            operation="vector_engrave", power_percent=10.0, frequency_khz=30.0,
+            pulse_width_ns=200.0, speed_mm_s=speed, cfg=fake_cfg(), field_size_mm=field_size_mm,
+        )
+
+    def test_3_mm_s_is_refused_at_the_calibrated_field(self):
+        errors = self.layer(3.0, 236.68)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("minimum is 3.62 mm/s", errors[0])
+
+    def test_the_reported_minimum_is_accepted(self):
+        self.assertEqual(self.layer(3.62, 236.68), [])
+        self.assertEqual(self.layer(3.61, 236.68)[0].count("3.62"), 1)
+
+    def test_minimum_follows_the_field(self):
+        self.assertIn("minimum is 3.06 mm/s", mark_speed_errors(3.0, 200.0)[0])
+        self.assertEqual(mark_speed_errors(3.06, 200.0), [])
+
+    def test_frame_only_layers_are_not_checked(self):
+        errors = validate_layer_settings(
+            operation="frame_only", power_percent=0.0, frequency_khz=30.0,
+            pulse_width_ns=200.0, speed_mm_s=1.0, cfg=fake_cfg(), field_size_mm=236.68,
+        )
+        self.assertEqual(errors, [])
 
 
 if __name__ == "__main__":
