@@ -978,6 +978,23 @@ def read_board_status() -> dict[str, Any]:
         controller.shutdown()
 
 
+def first_jump(c: GalvoController, x: int, y: int, *, lighting: bool = False) -> None:
+    """Jump explicitly to a list's first point (B3).
+
+    galvoplotter assumes the mirrors start at the field centre and drops a
+    move to the "current" point, so a list starting at design (0, 0) got no
+    JumpTo: its first MarkTo or red-light line started from wherever the
+    mirrors really were. The following goto()/dark() to the same point is
+    then skipped by galvoplotter, so other lists keep their exact bytes.
+    """
+    if lighting:
+        c.light_off()
+    if c.goto_speed is not None:
+        c.set_travel_speed(c.goto_speed)
+    c.set_delay_jump(c.delay_jump_short)
+    c.list_jump(x, y)
+
+
 def frame_box(cfg: MarkConfig, params: JobParams) -> dict[str, Any]:
     evaluate_emission(
         cfg=cfg,
@@ -996,6 +1013,7 @@ def frame_box(cfg: MarkConfig, params: JobParams) -> dict[str, Any]:
     try:
         def job(c: GalvoController) -> bool:
             with c.lighting():
+                first_jump(c, *points[0], lighting=True)
                 c.dark(*points[0])
                 for point in points[1:]:
                     c.light(*point)
@@ -1050,7 +1068,10 @@ class FrameLoop:
                     # Leave the spooler here; returning True would run
                     # initial_configuration() outside any handler.
                     raise ConnectionAbortedError("stop requested")
+                new_list = c.laser_configuration != "lighting"
                 c.lighting_configuration()
+                if new_list:
+                    first_jump(c, *job_paths[0][0], lighting=True)
                 for path in job_paths:
                     c.dark(*path[0])
                     for point in path[1:]:
@@ -1133,6 +1154,7 @@ def mark_box(cfg: MarkConfig, params: JobParams, arm: bool, confirm: str) -> dic
     try:
         def job(c: GalvoController) -> bool:
             with c.marking():
+                first_jump(c, *points[0])
                 c.goto(*points[0])
                 for point in points[1:]:
                     c.mark(*point)
@@ -1174,6 +1196,7 @@ def frame_polylines(cfg: MarkConfig, params: JobParams, polylines: list[list[lis
     try:
         def job(c: GalvoController) -> bool:
             with c.lighting():
+                first_jump(c, *job_paths[0][0], lighting=True)
                 for _ in range(repeats):
                     for path in job_paths:
                         c.dark(*path[0])
@@ -1221,6 +1244,7 @@ def mark_polylines(
     try:
         def job(c: GalvoController) -> bool:
             with c.marking():
+                first_jump(c, *job_paths[0][0])
                 for path in job_paths:
                     c.goto(*path[0])
                     for point in path[1:]:
